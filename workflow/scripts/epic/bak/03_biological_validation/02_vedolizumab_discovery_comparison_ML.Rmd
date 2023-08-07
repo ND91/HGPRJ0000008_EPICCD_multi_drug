@@ -1,0 +1,634 @@
+---
+title: "02_comparison_ML"
+author: "Andrew Y.F. Li Yim"
+date: "1/20/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+outputDir <- file.path("output","01_DM_analyses", "vedolizumab", "200323")
+
+classDir <- file.path(outputDir, "classification")
+gbmDir <- file.path(classDir, "gbm")
+enDir <- file.path(classDir, "elasticnet")
+
+rdsDir <- file.path(outputDir, "rds")
+```
+
+# Gradient boosting
+
+## Noob
+
+```{r gradient boosting}
+gbm_noob_t1_cpgs <- read.csv(file.path(gbmDir, "noob", "feat_imp_pairs.txt"), stringsAsFactors = F, sep = "\t")
+gbm_noob_t1_cpgs$CGID <- gsub("(cg[0-9]+)($|_.+)", "\\1", gbm_noob_t1_cpgs$FeatName)
+gbm_noob_t1_cpgs$Gene <- minfi::getAnnotation(rgset_vedo)[gbm_noob_t1_cpgs$CGID, "UCSC_RefGene_Name"]
+```
+
+## Noob (no SNP)
+
+```{r gradient boosting noSNP}
+gbm_noob_t1_cpgs_nosnp <- read.csv(file.path(gbmDir, "noob_nosnp", "feat_imp_pairs.txt"), stringsAsFactors = F, sep = "\t")
+gbm_noob_t1_cpgs_nosnp$CGID <- gsub("(cg[0-9]+)($|_.+)", "\\1", gbm_noob_t1_cpgs_nosnp$FeatName)
+gbm_noob_t1_cpgs_nosnp$Gene <- minfi::getAnnotation(rgset_vedo)[gbm_noob_t1_cpgs_nosnp$CGID, "UCSC_RefGene_Name"]
+```
+
+## Noob (no SNP no gap)
+
+```{r gradient boosting dT1T2}
+gbm_noob_t1_cpgs_nosnp_nogap <- read.csv(file.path(gbmDir, "noob_nosnp_nogap", "feat_imp_pairs.txt"), stringsAsFactors = F, sep = "\t")
+gbm_noob_t1_cpgs_nosnp_nogap$CGID <- gsub("(cg[0-9]+)($|_.+)", "\\1", gbm_noob_t1_cpgs_nosnp_nogap$FeatName)
+gbm_noob_t1_cpgs_nosnp_nogap$Gene <- minfi::getAnnotation(rgset_vedo)[gbm_noob_t1_cpgs_nosnp_nogap$CGID, "UCSC_RefGene_Name"]
+```
+
+## Elastic net
+
+```{r elastic net}
+en_noob_t1t2_cpgs <- read.csv(file.path(enDir, "median_stabilized_lor_df.csv"), stringsAsFactors = F)
+```
+
+## Overlap
+
+```{r upset}
+require(UpSetR)
+
+cpgs <- list(gbm = gbm_noob_t1_cpgs$CGID,
+             gbm_nosnp = gbm_noob_t1_cpgs_nosnp$CGID,
+             gbm_nosnp_nogap = gbm_noob_t1_cpgs_nosnp_nogap$CGID,
+             elnet = en_noob_t1t2_cpgs$X)
+
+Cairo(width = 1000, height = 750, type = "pdf", file = file.path(classDir, "overlap.pdf"), bg = "white", units = "px", dpi = 120)
+print(upset(fromList(cpgs), order.by = "freq"))
+dev.off()
+```
+
+## Genes of interest
+
+# Test across time
+
+```{r T2vT1}
+T2vT1_vedo_top <- read.csv(file.path(outputDir, "dmps", "T2vT1Dir", "T2vT1_vedo.csv"), stringsAsFactors = F)
+
+T2vT1_vedo_top[gbm_noob_t1_cpgs$CGID,]
+T2vT1_vedo_top[gbm_noob_t1_cpgs_nosnp$CGID,]
+T2vT1_vedo_top[gbm_noob_t1_cpgs_nosnp_nogap$CGID,]
+T2vT1_vedo_top[en_noob_t1t2_cpgs$X,]
+```
+
+```{r RvNR}
+RvNR_vedo <- read.csv(file.path(outputDir, "dmps", "RvNRDir", "RvNR_vedo.csv"), stringsAsFactors = F, row.names = 1)
+RvNR_vedo_gr <- makeGRangesFromDataFrame(RvNR_vedo, keep.extra.columns = T, seqnames.field = "seqnames", start.field = "start", end.field = "end")
+```
+
+```{r}
+t1_cpgs_df <- data.frame(CGID = gbm_noob_t1_cpgs$CGID,
+                         RvNR = RvNR_vedo[gbm_noob_t1_cpgs$CGID, "Beta"],
+                         T2vT1 = T2vT1_vedo_top[gbm_noob_t1_cpgs$CGID, "Beta"])
+
+Cairo(width = 500, height = 500, type = "png", file = file.path(classDir, "noob_swSNP.png"), bg = "white", units = "px", dpi = 120)
+ggplot(t1_cpgs_df, aes(x = RvNR, y = T2vT1)) +
+  geom_vline(xintercept = 0, col = "grey") +
+  geom_hline(yintercept = 0, col = "grey") +
+  ylim(-1,1) +
+  xlim(-1,1) +
+  geom_point() +
+  labs(title = "Difference in % methylation predictor CpGs") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+dev.off()
+```
+
+```{r}
+t1_cpgs_nosnp_df <- data.frame(CGID = gbm_noob_t1_cpgs_nosnp$CGID,
+                               RvNR = RvNR_vedo[gbm_noob_t1_cpgs_nosnp$CGID, "Beta"],
+                               T2vT1 = T2vT1_vedo_top[gbm_noob_t1_cpgs_nosnp$CGID, "Beta"])
+
+Cairo(width = 500, height = 500, type = "png", file = file.path(classDir, "noob_snoSNP.png"), bg = "white", units = "px", dpi = 120)
+ggplot(t1_cpgs_nosnp_df, aes(x = RvNR, y = T2vT1)) +
+  geom_vline(xintercept = 0, col = "grey") +
+  geom_hline(yintercept = 0, col = "grey") +
+  ylim(-1,1) +
+  xlim(-1,1) +
+  geom_point() +
+  labs(title = "Difference in % methylation predictor CpGs") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+dev.off()
+```
+
+# Visualization of the predictor CpGs
+
+```{r setup visualization predictor cpgs}
+timeplotDir <- file.path(classDir, "timepoints")
+dir.create(timeplotDir)
+```
+
+## Across time
+
+```{r across time}
+for(j in 1:length(cpgs)){
+  plotDir <- file.path(timeplotDir, names(cpgs)[j])
+  dir.create(plotDir)
+  
+  cpgs_sub <- cpgs[[j]][which(cpgs[[j]] %in% gmset_vedo_anno$Name)]
+  
+  for(i in 1:length(cpgs_sub)){
+    Cairo(width = 800, height = 800, type = "pdf", file = file.path(plotDir, paste0(cpgs_sub[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+    print(cpg_timeplot(cgid = cpgs_sub[i], 
+                       anno = gmset_vedo_anno,
+                       betas = getBeta(gmset_vedo_filtered_t1t2t3), 
+                       response = pData(gmset_vedo_filtered_t1t2t3)$Response,
+                       timepoint = pData(gmset_vedo_filtered_t1t2t3)$Timepoint,
+                       donor = pData(gmset_vedo_filtered_t1t2t3)$Biobank_ID,
+                       response_cols = response_cols))
+    dev.off() 
+  }
+}
+
+```
+
+```{r RvNR}
+RvNR_overlap_df <- data.frame(CGID = unique(unlist(cpgs)), 
+                         GBM = unique(unlist(cpgs)) %in% gbm_noob_t1_cpgs$CGID,
+                         GBM_noSNP = unique(unlist(cpgs)) %in% gbm_noob_t1_cpgs_nosnp$CGID,
+                         GBM_noSNP_nogap = unique(unlist(cpgs)) %in% gbm_noob_t1_cpgs_nosnp_nogap$CGID,
+                         elnet = unique(unlist(cpgs)) %in% en_noob_t1t2_cpgs$X) %>%
+  dplyr::left_join(RvNR_vedo[,c("X", "Beta", "P.Value", "seqnames", "start", "UCSC_RefGene_Name", "enhancer_gene")], by = c("CGID" = "X")) %>%
+  dplyr::left_join(gbm_noob_t1_cpgs[,c("RelFeatImp", "CGID")], by = "CGID") %>%
+  dplyr::rename("GBM_featimp" = "RelFeatImp") %>%
+  dplyr::left_join(gbm_noob_t1_cpgs_nosnp[,c("RelFeatImp", "CGID")], by = "CGID") %>%
+  dplyr::rename("GBM_noSNP_featimp" = "RelFeatImp") %>%
+  dplyr::left_join(gbm_noob_t1_cpgs_nosnp_nogap[,c("RelFeatImp", "CGID")], by = "CGID") %>%
+  dplyr::rename("GBM_noSNP_nogap_featimp" = "RelFeatImp") %>%
+  dplyr::left_join(en_noob_t1t2_cpgs[,c("X", "med_stablor")], by = c("CGID" = "X")) %>%
+  dplyr::rename("elnet_medstablor" = "med_stablor",
+                "RvNR_beta" = "Beta",
+                "RvNR_pval" = "P.Value") %>%
+  dplyr::select(CGID, GBM, GBM_featimp, GBM_noSNP, GBM_noSNP_featimp, GBM_noSNP_nogap, GBM_noSNP_nogap_featimp, elnet, elnet_medstablor, RvNR_beta, RvNR_pval, seqnames, start, UCSC_RefGene_Name, enhancer_gene)
+
+write.csv(RvNR_overlap_df, "RvNR_overlap.csv")
+
+betas <- getBeta(gmset_vedo)
+
+for(i in 1:nrow(RvNR_overlap_df)){
+  Cairo(width = 600, height = 600, type = "png", file = paste0(i, "_", RvNR_overlap_df$CGID[i], ".png"), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = RvNR_overlap_df$CGID[i],
+                              betas = betas, 
+                              factor_interest = pData(gmset_vedo_filtered)$Response, enlarged = F))
+  dev.off()
+}
+```
+
+# Genes
+
+```{r genes}
+require(minfi)
+require(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+epic_anno <- minfi::getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+
+genes_of_interest <- epic_anno[unique(unlist(cpgs)), "UCSC_RefGene_Name"]
+genes_of_interest <- unlist(lapply(lapply(strsplit(genes_of_interest, ";"), unique), paste, collapse = ";"))
+genes_of_interest <- genes_of_interest[genes_of_interest != ""]
+
+genes_of_interest_freq <- data.frame(table(genes_of_interest)[order(table(genes_of_interest), decreasing = T)])
+colnames(genes_of_interest_freq) <- c("Gene", "Frequency")
+
+write.csv(genes_of_interest_freq, file.path(classDir, "ML_overlap_genes.csv"))
+
+mdmg <- genes_of_interest_freq[genes_of_interest_freq$Frequency>1,]
+
+RvNR_vedo_gr$adj.P.Val_old <- RvNR_vedo_gr$adj.P.Val
+RvNR_vedo_gr$adj.P.Val <- 1
+RvNR_vedo_gr$adj.P.Val[which(names(RvNR_vedo_gr) %in% unique(unlist(cpgs)))] <- 0.01
+
+Cairo(width = 1000, height = 750, type = "pdf", file = file.path(classDir, "overlap.pdf"), bg = "white", units = "px", dpi = 120)
+genes_of_interest_freq %>%
+  ggplot(aes(x = Gene, y = Frequency)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  labs(title = "Frequency predictor CpGs per gene") +
+  scale_y_continuous(breaks=seq(0,15,1)) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.x = element_blank())
+```
+
+```{r mdmg}
+for(i in nrow(mdmg)){
+  Cairo(width = 1000, height = 750, type = "pdf", file = file.path(classDir, "genes_of_interest", "gene_plot", paste0(mdmg$Gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmg_plot(gene_of_interest = mdmg$Gene[i], tophits_gr = RvNR_vedo_gr, smooth = T, significance = T))
+  dev.off()
+}
+```
+
+```{r TNXB}
+tnxbDir <- file.path(classDir, "overlap", "gene_plot", "TNXB")
+dir.create(tnxbDir)
+
+cpg_strip_plot(cpg_num = "cg01337207", betas = getBeta(gmset_vedo_filtered_t1t2), factor_interest = pData(gmset_vedo_filtered_t1t2)$resptime, type = "SE") + 
+  labs(title = "cg01337207",
+       subtitle = paste0(RvNR_vedo_top["cg01337207",]$seqnames, ":", RvNR_vedo_top["cg01337207",]$start)) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())
+
+TNXB_gr <- RvNR_vedo_gr[start(RvNR_vedo_gr) >= 32055000 & seqnames(RvNR_vedo_gr) == "chr6"]
+
+TNXB_plot <- dmg_plot(gene_of_interest = "TNXB", tophits_gr = TNXB_gr, smooth = T, significance = T, stat = "identity", xlim = c(32060000, 32070000))
+
+Cairo(width = 1000, height = 750, type = "pdf", file = file.path(classDir, "overlap", "gene_plot", "TNXB_chr6-62060000-62070000_methdiff.pdf"), bg = "white", units = "px", dpi = 120)
+print(TNXB_plot)
+dev.off()
+
+
+Cairo(width = 1000, height = 750, type = "pdf", file = file.path(classDir, "overlap", "gene_plot", "TNXB_chr6-62060000-62070000_meth_persample.pdf"), bg = "white", units = "px", dpi = 120)
+dmr_plot(dmr_gr = GRanges(seqnames = "chr6", ranges = IRanges(start = 32060000, end = 32070000)),
+         meth_data = getBeta(gmset_vedo_filtered_t1t2),
+         anno_gr = gmset_vedo_anno_gr,
+         meth_groups = pData(gmset_vedo_filtered_t1t2)$Response, 
+         title = "TNXB", flanks = 0, 
+         smooth = T, 
+         groupline = "sample") + scale_color_manual(values = response_cols)
+dev.off()
+
+Cairo(width = 1000, height = 750, type = "pdf", file = file.path(classDir, "overlap", "gene_plot", "TNXB_chr6-62060000-62070000_meth_pergroup.pdf"), bg = "white", units = "px", dpi = 120)
+dmr_plot(dmr_gr = GRanges(seqnames = "chr6", ranges = IRanges(start = 32060000, end = 32070000)),
+         meth_data = getBeta(gmset_vedo_filtered_t1t2),
+         anno_gr = gmset_vedo_anno_gr,
+         meth_groups = pData(gmset_vedo_filtered_t1t2)$Response, 
+         title = "TNXB", flanks = 0, 
+         smooth = T, 
+         groupline = "group") + scale_color_manual(values = response_cols)
+dev.off()
+
+TNXB_coi <- RvNR_vedo_top %>%
+  filter(grepl("TNXB",UCSC_RefGene_Name) & 
+           start > 32060000 &
+           start < 32070000 &
+           Beta > 0.05)
+
+for(i in 1:nrow(TNXB_coi)){
+  Cairo(width = 800, height = 800, type = "pdf", file = file.path(tnxbDir, paste0(TNXB_coi$Name[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(cpg_timeplot(cgid = TNXB_coi$Name[i], 
+                     anno = gmset_vedo_anno,
+                     betas = getBeta(gmset_vedo_filtered_t1t2t3), 
+                     response = pData(gmset_vedo_filtered_t1t2t3)$Response,
+                     timepoint = pData(gmset_vedo_filtered_t1t2t3)$Timepoint,
+                     donor = pData(gmset_vedo_filtered_t1t2t3)$Biobank_ID,
+                     response_cols = response_cols))
+  dev.off() 
+}
+
+```
+
+```{r tnxb df}
+TNXB_df <- data.frame(RvNR_vedo_gr[grep("TNXB", RvNR_vedo_gr$UCSC_RefGene_Name), c("Name", "Beta", "adj.P.Val", "UCSC_RefGene_Name")])
+TNXB_df <- TNXB_df[order(TNXB_df$start),]
+TNXB_df$Status <- ""
+TNXB_df$Status[TNXB_df$adj.P.Val == 0.01] <- "Predictive"
+
+TNXB_df <- TNXB_df %>%
+  filter(start > 32063000 & TNXB_df$start < 32065000) %>%
+  select(-adj.P.Val)
+
+write.csv(TNXB_df, file.path(classDir, "overlap", "TNXB.csv"))
+```
+
+```{r HLA-C df}
+HLAC_df <- data.frame(RvNR_vedo_gr[grep("HLA-C", RvNR_vedo_gr$UCSC_RefGene_Name), c("Name", "Beta", "adj.P.Val", "UCSC_RefGene_Name")])
+HLAC_df <- HLAC_df[order(HLAC_df$start),]
+HLAC_df$Status <- ""
+HLAC_df$Status[HLAC_df$adj.P.Val == 0.01] <- "Predictive"
+
+HLAC_df <- HLAC_df %>%
+  select(-adj.P.Val)
+
+write.csv(HLAC_df, file.path(classDir, "overlap", "HLA-C.csv"))
+```
+
+```{r RHOJ df}
+RHOJ_df <- data.frame(RvNR_vedo_gr[grep("RHOJ", RvNR_vedo_gr$UCSC_RefGene_Name), c("Name", "Beta", "adj.P.Val", "UCSC_RefGene_Name")])
+RHOJ_df <- RHOJ_df[order(RHOJ_df$start),]
+RHOJ_df$Status <- ""
+RHOJ_df$Status[RHOJ_df$adj.P.Val == 0.01] <- "Predictive"
+
+RHOJ_df <- RHOJ_df %>%
+  select(-adj.P.Val)
+
+write.csv(RHOJ_df, file.path(classDir, "overlap", "RHOJ.csv"))
+```
+
+# Genetic variants
+
+```{r genetic variants}
+gbm_gvDir <- file.path(gbmDir, "genetic_variants")
+dir.create(gbm_gvDir)
+
+require(SNPlocs.Hsapiens.dbSNP151.GRCh38)
+require(liftOver)
+require(rsnps)
+require(biomaRt)
+require(viridis)
+
+vedo_gh <- readRDS(file.path(rdsDir, "vedo_gh.Rds"))
+
+gbm_t1_cpgs_gh <- intersect(rownames(vedo_gh$proberesults), gbm_t1_cpgs_sig$CGID)
+gbm_t1_cpgs_gh <- vedo_gh$proberesults[gbm_t1_cpgs_gh,]
+
+gbm_t1_cpgs_gh_anno_gr <- makeGRangesFromDataFrame(gmset_vedo_anno[rownames(gbm_t1_cpgs_gh),], keep.extra.columns = F, start.field = "pos", end.field = "pos")
+
+hg19tohg38 <- import.chain("/home/ayliyim/archive/common_data/liftover_chains/hg19ToHg38.over.chain")
+
+gbm_t1_cpgs_gh_anno_hg38_gr <- unlist(liftOver(gbm_t1_cpgs_gh_anno_gr, hg19tohg38))
+#gbm_t1_cpgs_gh_anno_hg38_gr <- split(gbm_t1_cpgs_gh_anno_hg38_gr, seqnames(gbm_t1_cpgs_gh_anno_hg38_gr))
+gbm_t1_cpgs_gh_anno_hg38_gr <- gbm_t1_cpgs_gh_anno_hg38_gr+50
+seqlevelsStyle(gbm_t1_cpgs_gh_anno_hg38_gr) <- seqlevelsStyle(SNPlocs.Hsapiens.dbSNP151.GRCh38)
+
+gbm_t1_cpgs_gh_snps <- snpsByOverlaps(x = SNPlocs.Hsapiens.dbSNP151.GRCh38, ranges = gbm_t1_cpgs_gh_anno_hg38_gr)
+saveRDS(gbm_t1_cpgs_gh_snps, file.path(gbm_gvDir, "gbm_t1_cpgs_df_GVs.Rds"))
+
+#MAF
+enssnp_mart <- useDataset(mart = useMart("ENSEMBL_MART_SNP"), dataset = "hsapiens_snp")
+gbm_t1_cpgs_gh_snps_df <- getBM(attributes = c("refsnp_id", "allele", "minor_allele_freq"), filters = "snp_filter", values = gbm_t1_cpgs_gh_snps$RefSNP_id, mart = enssnp_mart)
+gbm_t1_cpgs_gh_snps_df <- gbm_t1_cpgs_gh_snps_df[!is.na(gbm_t1_cpgs_gh_snps_df$minor_allele_freq),]
+
+gbm_t1_cpgs_gh_snps <- makeGRangesFromDataFrame(merge(data.frame(gbm_t1_cpgs_gh_snps), gbm_t1_cpgs_gh_snps_df, by.x = "RefSNP_id", by.y = "refsnp_id"), keep.extra.columns = T, start.field = "pos", end.field = "pos")
+
+gbm_t1_cpgs_gh_snps_pcgv_ol <- findOverlaps(gbm_t1_cpgs_gh_snps, gbm_t1_cpgs_gh_anno_hg38_gr)
+
+gbm_t1_cpgs_gh_snps_ol <- gbm_t1_cpgs_gh_snps[queryHits(gbm_t1_cpgs_gh_snps_pcgv_ol)]
+gbm_t1_cpgs_gh_snps_ol$CpG <- names(gbm_t1_cpgs_gh_anno_hg38_gr)[subjectHits(gbm_t1_cpgs_gh_snps_pcgv_ol)]
+gbm_t1_cpgs_gh_snps_ol$CpG_pos <- start(gbm_t1_cpgs_gh_anno_hg38_gr-50)[subjectHits(gbm_t1_cpgs_gh_snps_pcgv_ol)]
+gbm_t1_cpgs_gh_snps_ol$GV_relpos <- gbm_t1_cpgs_gh_snps_ol$CpG_pos-start(gbm_t1_cpgs_gh_snps_ol)
+gbm_t1_cpgs_gh_snps_ol$GV_type <- "probe GV"
+gbm_t1_cpgs_gh_snps_ol$GV_type[gbm_t1_cpgs_gh_snps_ol$GV_relpos %in% c(-1, 0, 1)] <- "CpG GV"
+gbm_t1_cpgs_gh_snps_ol$Gene <- RvNRT1_vedo_top$UCSC_RefGene_Name[match(gbm_t1_cpgs_gh_snps_ol$CpG, RvNRT1_vedo_top$Name)]
+gbm_t1_cpgs_gh_snps_ol$Beta <- RvNRT1_vedo_top$P.Value[match(gbm_t1_cpgs_gh_snps_ol$CpG, RvNRT1_vedo_top$Name)]
+gbm_t1_cpgs_gh_snps_ol$Pvalue <- RvNRT1_vedo_top$Beta[match(gbm_t1_cpgs_gh_snps_ol$CpG, RvNRT1_vedo_top$Name)]
+gbm_t1_cpgs_gh_snps_df <- data.frame(gbm_t1_cpgs_gh_snps_ol)
+gbm_t1_cpgs_gh_snps_df <- gbm_t1_cpgs_gh_snps_df[, c("CpG", "seqnames", "CpG_pos", "Beta", "Pvalue", "RefSNP_id", "start", "GV_relpos", "allele", "GV_type", "minor_allele_freq", "Gene")]
+colnames(gbm_t1_cpgs_gh_snps_df) <- c("CpG", "Chromosome", "CpG_position", "Beta", "Pvalue", "RSID", "GV_position", "GV_CpG_relpos", "Alleles", "GV_type", "MAF_all_1000g", "Gene")
+
+write.csv(gbm_t1_cpgs_gh_snps_df, file = file.path(gbm_gvDir, "gbm_t1_cpgs_df_GVs.csv"))
+
+#up
+gbm_t1_cpgs_cl_plot <- data.frame(Type = c("non-clustered", "clustered"),
+                                  DMPs = c(nrow(gbm_t1_cpgs_sig)-nrow(gbm_t1_cpgs_gh), nrow(gbm_t1_cpgs_gh)),
+                                  Group = "DMPs") %>%
+  ggplot(aes(x = Group, y = DMPs, fill = Type)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = DMPs), position = position_stack(vjust = 0.5)) +
+  scale_fill_viridis(discrete = T) +
+  coord_flip() +
+  ggtitle("DMPs with catalogued GVs") +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+#left
+gbm_t1_cpgs_gh_snps_typegv_df <- data.frame(table(gbm_t1_cpgs_gh_snps_df$GV_type))
+gbm_t1_cpgs_gh_snps_typegv_df$Var1 <- gsub(" GV", "", gbm_t1_cpgs_gh_snps_typegv_df$Var1)
+colnames(gbm_t1_cpgs_gh_snps_typegv_df) <- c("Location", "GVs")
+
+gbm_t1_cpgs_gh_snps_typegv_plot <- ggplot(gbm_t1_cpgs_gh_snps_typegv_df, aes(x = Location, y = GVs)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = GVs), position = position_stack(vjust = 0.5)) +
+  ggtitle("Location of GVs") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+gbm_t1_cpgs_gc_plot_tr <- ggarrange(gbm_t1_cpgs_cl_plot, gbm_t1_cpgs_gh_snps_typegv_plot, nrow = 2, align = "v", heights = c(0.5, 1))
+
+#right
+gbm_t1_cpgs_gh_snps_cpgs_gv_plot <- data.frame(gbm_t1_cpgs_gh_snps_ol) %>%
+  ggplot(aes(x = GV_relpos, y = minor_allele_freq, col = minor_allele_freq, alpha = -log(abs(GV_relpos+0.001)))) +
+  #geom_line(aes(group = CpG)) +
+  geom_point() +
+  geom_rect(data = data.frame(x0 = -1.5, x1 = 1.5),
+            inherit.aes = FALSE,
+            aes(xmin = x0, xmax = x1, ymin = -Inf, ymax = Inf), alpha = 0.15) +
+  #facet_wrap(~CpG, ncol = 12) +
+  xlab("Position relative to CpG of interest") +
+  ylab("MAF") +
+  theme_bw() +
+  theme(legend.pos = "none", 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+gbm_t1_cpgs_gc_plot <- ggarrange(gbm_t1_cpgs_gc_plot_tr, gbm_t1_cpgs_gh_snps_cpgs_gv_plot, ncol = 2, widths = c(0.5, 1))
+
+Cairo(width = 2500, height = 1250, type = "pdf", file = file.path(gbm_gvDir, "gbm_t1_cpgs_gh_snps_GVs.pdf"), bg = "white", units = "px", dpi = 120)
+#Cairo(width = 10000, height = 3000, type = "pdf", file = file.path(gvDir, "gbm_t1_cpgs_gh_snps_GVs.pdf"), bg = "white", units = "px", dpi = 120)
+print(gbm_t1_cpgs_gc_plot)
+dev.off()
+```
+
+# Elastic net
+
+```{r elastic net}
+en_cpgs <- read.csv(file.path(enDir, "median_stabilized_lor_df.csv"), stringsAsFactors = F)
+```
+
+# Overlap
+
+```{r overlap}
+intersect_cpgs <- intersect(en_cpgs$Name, gbm_t1_cpgs_sig$CGID)
+union_cpgs <- rbind(data.frame(CpGs = en_cpgs$Name, analysis = "Elastic net"), 
+                    data.frame(CpGs = gbm_t1_cpgs_sig$CGID, analysis = "Gradient boosting"))
+union_cpgs <- union_cpgs[union_cpgs$CpGs != intersect_cpgs,]
+union_cpgs <- rbind(union_cpgs, data.frame(CpGs = intersect_cpgs, analysis = "Both"))
+```
+
+```{r overlap noSNP}
+intersect_cpgs_nosnp <- intersect(en_cpgs$Name, gbm_t1_cpgs_nosnps_sig$CGID)
+union_cpgs <- rbind(data.frame(CpGs = en_cpgs$Name, analysis = "Elastic net"), 
+                    data.frame(CpGs = gbm_t1_cpgs_sig$CGID, analysis = "Gradient boosting"))
+union_cpgs <- union_cpgs[union_cpgs$CpGs != intersect_cpgs,]
+union_cpgs <- rbind(union_cpgs, data.frame(CpGs = intersect_cpgs, analysis = "Both"))
+```
+
+```{r RvNRT1}
+dmpRvNRT1Dir <- file.path("output", "01_DM_analyses", "vedolizumab", "dmps", "RvNRT1Dir")
+
+dmpRvNRT1 <- read.csv(file.path(dmpRvNRT1Dir, "RvNRT1_vedo.csv"), stringsAsFactors = F)
+union_cpgs_annotated <- dmpRvNRT1[match(union_cpgs$CpGs, dmpRvNRT1$Name),]
+union_cpgs_annotated$Analysis <- union_cpgs$analysis
+```
+
+# Time stability
+
+```{r with SNPs}
+#Version 1
+RvNR_vedo_resp_time_gbm <- data.frame(CpG = gbm_t1_cpgs_sig$CGID,
+                                      RvNR_beta = RvNRT1_vedo_top[gbm_t1_cpgs_sig$CGID,]$Beta,
+                                      RvNR_pval = RvNRT1_vedo_top[gbm_t1_cpgs_sig$CGID,]$P.Value,
+                                      RvNR_padj = RvNRT1_vedo_top[gbm_t1_cpgs_sig$CGID,]$adj.P.Val,
+                                      T2vT1_beta = T2vT1_vedo_top[gbm_t1_cpgs_sig$CGID,]$Beta,
+                                      T2vT1_pval = T2vT1_vedo_top[gbm_t1_cpgs_sig$CGID,]$P.Value,
+                                      T2vT1_padj = T2vT1_vedo_top[gbm_t1_cpgs_sig$CGID,]$adj.P.Val)
+
+figTI_v1 <- ggplot(RvNR_vedo_resp_time_gbm, aes(x = RvNR_beta, y = T2vT1_beta)) +
+  geom_hline(yintercept = 0, col = "grey") +
+  geom_vline(xintercept = 0, col = "grey") +
+  geom_point() +
+  xlim(-0.5,0.5) +
+  ylim(-0.5,0.5) +
+  labs(title = "Difference in % methylation",
+       subtitle = "Response-associated DMPs") +
+  xlab("R vs NR") +
+  ylab("T2 vs T1") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+Cairo(width = 400, height = 450, type = "png", file = file.path("difference_beta_RvNR_T2vT1_withSNPs.png"), bg = "white", units = "px", dpi = 120)
+print(figTI_v1)
+dev.off()
+```
+
+```{r}
+betas_t1t2_gbm_withsnps <- data.frame(t(getBeta(gmset_vedo_filtered_t1t2)[gbm_t1_cpgs_sig$CGID,]))
+betas_t1t2_gbm_withsnps$SXS_ID <- rownames(betas_t1t2_gbm_withsnps)
+betas_t1t2_gbm_withsnps <- reshape2::melt(betas_t1t2_gbm_withsnps, variable.name = "CpG", value.name = "Beta")
+pdata_t1t2_gbm_withsnps <- data.frame(pData(gmset_vedo_filtered_t1t2)[, c("Timepoint", "Response", "Biobank_ID")], SXS_ID = rownames(pData(gmset_vedo_filtered_t1t2)))
+
+t1t2_gbm_withsnps_df <- merge(betas_t1t2_gbm_withsnps, pdata_t1t2_gbm_withsnps, by = "SXS_ID")
+
+gbm_rvnr_t1t2_withsnps_plot <- ggplot(t1t2_gbm_withsnps_df, aes(x = Timepoint, y = Beta, col = Response)) +
+  #geom_point(aes(group = Biobank_ID), alpha = 0.1, show.legend = F) +
+  geom_line(aes(group = Biobank_ID, alpha = 0.05), linetype = "dotted", show.legend = F) +
+  geom_smooth(method = "lm", aes(group = Response), se = F) +
+  facet_wrap(~CpG, ncol = 5) +
+  ylab("% Methylation") +
+  theme_bw() +
+  scale_x_continuous(breaks=seq(1,2)) +
+  theme(axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        text = element_text(size = 12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+Cairo(width = 1050, height = 800, type = "png", file = file.path("beta_RvNR_T2vT1_withSNPs.png"), bg = "white", units = "px", dpi = 120)
+print(gbm_rvnr_t1t2_withsnps_plot)
+dev.off()
+```
+
+
+```{r}
+#Version 2
+RvNR_vedo_resp_time_gbm <- data.frame(CpG = gbm_t1_cpgs_nosnps_sig$CGID,
+                                      RvNR_beta = RvNRT1_vedo_top[gbm_t1_cpgs_nosnps_sig$CGID,]$Beta,
+                                      RvNR_pval = RvNRT1_vedo_top[gbm_t1_cpgs_nosnps_sig$CGID,]$P.Value,
+                                      RvNR_padj = RvNRT1_vedo_top[gbm_t1_cpgs_nosnps_sig$CGID,]$adj.P.Val,
+                                      T2vT1_beta = T2vT1_vedo_top[gbm_t1_cpgs_nosnps_sig$CGID,]$Beta,
+                                      T2vT1_pval = T2vT1_vedo_top[gbm_t1_cpgs_nosnps_sig$CGID,]$P.Value,
+                                      T2vT1_padj = T2vT1_vedo_top[gbm_t1_cpgs_nosnps_sig$CGID,]$adj.P.Val)
+
+figTI_v2 <- ggplot(RvNR_vedo_resp_time_gbm, aes(x = T2vT1_beta, y = RvNR_beta)) +
+  geom_hline(yintercept = 0, col = "black") +
+  geom_vline(xintercept = 0, col = "black") +
+  geom_point(col = "#c00000") +
+  xlim(-0.5,0.5) +
+  ylim(-0.5,0.5) +
+  labs(title = "Difference in % methylation",
+       subtitle = "Response-associated DMPs") +
+  ylab("R vs NR") +
+  xlab("T2 vs T1") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+Cairo(width = 400, height = 450, type = "png", file = file.path("difference_beta_RvNR_T2vT1_noSNPs.png"), bg = "white", units = "px", dpi = 120)
+print(figTI_v2)
+dev.off()
+```
+
+```{r}
+betas_t1t2_gbm_withoutsnps <- data.frame(t(getBeta(gmset_vedo_filtered_t1t2)[gbm_t1_cpgs_nosnps_sig$CGID,]))
+betas_t1t2_gbm_withoutsnps$SXS_ID <- rownames(betas_t1t2_gbm_withoutsnps)
+betas_t1t2_gbm_withoutsnps <- reshape2::melt(betas_t1t2_gbm_withoutsnps, variable.name = "CpG", value.name = "Beta")
+pdata_t1t2_gbm_withoutsnps <- data.frame(pData(gmset_vedo_filtered_t1t2)[, c("Timepoint", "Response", "Biobank_ID")], SXS_ID = rownames(pData(gmset_vedo_filtered_t1t2)))
+
+t1t2_gbm_withoutsnps_df <- merge(betas_t1t2_gbm_withoutsnps, pdata_t1t2_gbm_withoutsnps, by = "SXS_ID")
+t1t2_gbm_withoutsnps_df$CpG <- factor(t1t2_gbm_withoutsnps_df$CpG, levels = rev(gbm_t1_cpgs_nosnps_sig$CGID))
+
+gbm_rvnr_t1t2_withoutsnps_plot <- ggplot(t1t2_gbm_withoutsnps_df, aes(x = Timepoint, y = Beta, col = Response)) +
+  #geom_point(aes(group = Biobank_ID), alpha = 0.1, show.legend = F) +
+  geom_line(aes(group = Biobank_ID, alpha = 0.05), linetype = "dotted", show.legend = F) +
+  geom_smooth(method = "lm", aes(group = Response), se = F) +
+  facet_wrap(~CpG, ncol = 5) +
+  ylab("% Methylation") +
+  theme_bw() +
+  scale_x_continuous(breaks=seq(1,2)) +
+  theme(axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        text = element_text(size = 12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+Cairo(width = 1050, height = 1800, type = "png", file = file.path("beta_RvNR_T2vT1_withoutsnps.png"), bg = "white", units = "px", dpi = 120)
+print(gbm_rvnr_t1t2_withoutsnps_plot)
+dev.off()
+```
+
+```{r}
+RvNR_t1t2_df <- data.frame(CpG = rep(gbm_t1_cpgs_nosnps_sig$CGID, 2), 
+                           Beta = c(RvNRT1_vedo_top[gbm_t1_cpgs_nosnps_sig$CGID, "Beta"],
+                                    RvNRT2_vedo_top[gbm_t1_cpgs_nosnps_sig$CGID, "Beta"]),
+                           Timepoint = rep(c("T1", "T2"), each = nrow(gbm_t1_cpgs_nosnps_sig)))
+
+ecco_stability_t1t2_plot <- ggplot(RvNR_t1t2_df, aes(x = Timepoint, y = Beta, group = CpG)) +
+  geom_point(col = "#c00000") +
+  geom_line(alpha = 0.1, col = "#c00000") +
+  theme_bw() +
+  labs(title = "Stability R v NR predictor CpGs",
+       subtitle = "N = 30") +
+  geom_hline(yintercept = 0, col = "black") +
+  ylim(-1, 1) +
+  ylab("R vs NR") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+Cairo(width = 800, height = 800, type = "png", file = file.path("ecco_stability_t1t2_plot.png"), bg = "white", units = "px", dpi = 120)
+print(ecco_stability_t1t2_plot)
+dev.off()
+
+```
+
+```{r T1T2T3}
+RvNR_t1t2t3_df <- data.frame(CpG = rep(gbm_t1_cpgs_nosnps_sig$CGID, 3), 
+                             Beta = c(RvNR_T1_vedot1t2t3_top[gbm_t1_cpgs_nosnps_sig$CGID, "Beta"],
+                                      RvNR_T2_vedot1t2t3_top[gbm_t1_cpgs_nosnps_sig$CGID, "Beta"],
+                                      RvNR_T3_vedot1t2t3_top[gbm_t1_cpgs_nosnps_sig$CGID, "Beta"]),
+                             Timepoint = rep(c("T1", "T2", "T3"), each = nrow(gbm_t1_cpgs_nosnps_sig)))
+
+
+ecco_stability_t1t2t3_plot <- ggplot(RvNR_t1t2t3_df, aes(x = Timepoint, y = Beta, group = CpG)) +
+  geom_point(col = "#c00000") +
+  geom_line(alpha = 0.1, col = "#c00000") +
+  theme_bw() +
+  labs(title = "Long-term stability R v NR predictor CpGs",
+       subtitle = "N = 10") +
+  geom_hline(yintercept = 0, col = "black") +
+  ylim(-1, 1) +
+  ylab("R vs NR") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+Cairo(width = 1200, height = 800, type = "png", file = file.path("ecco_stability_t1t2t3_plot.png"), bg = "white", units = "px", dpi = 120)
+print(ecco_stability_t1t2t3_plot)
+dev.off()
+
+```

@@ -1,0 +1,9 @@
+channels:
+  - bioconda      
+  - conda-forge
+  - defaults
+  - r
+dependencies:
+  - bioconductor-minfi=1.38.0
+  - bioconductor-limma=3.48.0
+  - bioconductor-dmrcate=2.6.0

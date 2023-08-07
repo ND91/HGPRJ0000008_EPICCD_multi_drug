@@ -1,0 +1,13 @@
+channels:
+  - bioconda      
+  - conda-forge
+  - anaconda
+  - defaults
+  - r
+dependencies:
+  - r-tidyverse=2.0.0
+  - r-statmod
+  - bioconductor-minfi=1.44.0
+  - bioconductor-limma
+  - bioconductor-dmrcate=2.12.0
+  - bioconductor-dmrcatedata=2.16.0

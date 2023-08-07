@@ -1,0 +1,131 @@
+---
+title: "DM analyses response"
+author: "Andrew Y.F. Li Yim"
+date: "6 November 2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r snr predictions setup}
+#snr_predictions_t1 <- as.data.frame(readxl::read_excel(file.path("output", "DM_analyses", "04_super_response", "output", "horaizon", "210121_SNR_responses.xlsx")))
+snr_predictions_t1 <- as.data.frame(readxl::read_excel(file.path("output", "DM_analyses", "04_super_response", "output", "horaizon", "211104_SNR_responses.xlsx")))
+
+
+snr_actual <- as.data.frame(readxl::read_excel(file.path("output", "DM_analyses", "04_super_response", "data", "211013_SNR_metadata.xlsx")))[-c(43:45),] %>%
+  dplyr::filter(`EPIC VEDO Cohort` == "validation")
+
+snr_predictions_t1_anno <- snr_predictions_t1 %>%
+  dplyr::left_join(snr_actual, by = c("SampleID" = "biobank code")) %>%
+  dplyr::mutate(Response_bin = ifelse(Response == "SR", 1, 0))
+```
+
+```{r horaizon performance binary}
+predstats <- function(predicted, actual){
+  confusion_matrix <- data.frame(table(predicted = predicted, actual = actual))
+  
+  prediction_stats <- data.frame(TP = confusion_matrix$Freq[4],
+                                 TN = confusion_matrix$Freq[1],
+                                 FP = confusion_matrix$Freq[2],
+                                 FN = confusion_matrix$Freq[3]) %>%
+    dplyr::mutate(Precision = TP/(TP+FP),
+                  Recall = TP/(TP+FN),
+                  Accuracy = (TP+TN)/(TP+FP+FN+TN),
+                  PPV = TP/(TP+FP),
+                  NPV = TN/(TN+FN),
+                  F1score = 2*(Recall*Precision)/(Recall+Precision))
+  
+  return(prediction_stats)
+}
+
+vedoval_predictionstats <- foreach(i = 2:4, .combine = rbind) %do%
+  predstats(predicted = snr_predictions_t1_anno[,i], 
+            actual = as.character(snr_predictions_t1_anno$Response_bin))
+
+rownames(vedoval_predictionstats) <- paste0("model", 1:10)
+
+write.csv(vedoval_predictionstats, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "predictions_stats.csv"))
+```
+
+```{r}
+predstats_211104 <- rbind(predstats(predicted = snr_predictions_t1_anno$MODEL1, 
+                                    actual = as.character(snr_predictions_t1_anno$Response_bin)),
+                          predstats(predicted = snr_predictions_t1_anno$MODEL2, 
+                                    actual = as.character(snr_predictions_t1_anno$Response_bin)))
+
+rownames(predstats_211104) <- c("model1", "model2")
+```
+
+
+```{r}
+M1_roc <- pROC::roc(snr_predictions_t1_anno$Response_bin, snr_predictions_t1_anno$M1)
+auc(M1_roc)
+M2_roc <- pROC::roc(snr_predictions_t1_anno$Response_bin, snr_predictions_t1_anno$M2)
+auc(M2_roc)
+M3_roc <- pROC::roc(snr_predictions_t1_anno$Response_bin, snr_predictions_t1_anno$M3)
+auc(M3_roc)
+
+M1_ROC <- pROC::roc(snr_predictions_t1_anno$Response_bin, snr_predictions_t1_anno$`MODEL1 - PROBA - FOR AUC`)
+M1_ROC_bin <- pROC::roc(snr_predictions_t1_anno$Response_bin, (snr_predictions_t1_anno$`MODEL1 - PROBA - FOR AUC`<0.5)*1)
+
+M2_ROC <- pROC::roc(snr_predictions_t1_anno$Response_bin, snr_predictions_t1_anno$`MODEL2 - PROBA - FOR AUC`)
+M2_ROC_bin <- pROC::roc(snr_predictions_t1_anno$Response_bin, (snr_predictions_t1_anno$`MODEL2 - PROBA - FOR AUC`<0.5)*1)
+```
+
+
+```{r horaizon performance probabilities}
+require(plotROC)
+
+
+Cairo(width = 1250, height = 1250, type = "pdf", file = file.path("model2_ROC.pdf"), bg = "white", units = "px", dpi = 120)
+snr_predictions_t1_anno %>%
+  tidyr::pivot_longer(!c(SampleID, Response, `EPIC VEDO Cohort`, Response_bin), names_to = "Model", values_to = "Probabilities") %>%
+  dplyr::filter(Model == "M3") %>%
+  ggplot(aes(m = Probabilities, d = Response_bin, col = Model)) +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  theme_bw() +
+  labs(title = "ROC",
+       y = "TPR",
+       x = "FPR")
+dev.off()
+
+Cairo(width = 1250, height = 1250, type = "pdf", file = file.path("model10_ROC.pdf"), bg = "white", units = "px", dpi = 120)
+ggplot(vedoval_prediction_probabilities_t1, aes(m = Model10, d = Response_bin)) +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  theme_bw() +
+  labs(title = "Model 10",
+       y = "TPR",
+       x = "FPR")
+dev.off()
+
+Cairo(width = 1500, height = 1250, type = "pdf", file = file.path("model_both_ROC.pdf"), bg = "white", units = "px", dpi = 120)
+vedoval_prediction_probabilities_t1 %>%
+  tidyr::pivot_longer(-c(Biobank_ID, Response, Response_bin), names_to = "Model", values_to = "Probabilities") %>%
+  ggplot(aes(m = Probabilities, d = Response, col = Model)) +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  theme_bw() +
+  labs(y = "TPR",
+       x = "FPR")
+dev.off()
+
+
+snr_predictions_t1_anno %>%
+  dplyr::select(-c(MODEL1, MODEL2)) %>%
+  dplyr::rename(Model1 = `MODEL1 - PROBA - FOR AUC`,
+                Model2 = `MODEL2 - PROBA - FOR AUC`) %>%
+  tidyr::pivot_longer(!c(SampleID, Response, `EPIC VEDO Cohort`, Response_bin), names_to = "Model", values_to = "Probabilities") %>%
+  #dplyr::filter(Model == "Model1") %>%
+  ggplot(aes(m = Probabilities, d = Response_bin, col = Model)) +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  theme_bw() +
+  labs(title = "ROC",
+       y = "TPR",
+       x = "FPR")
+
+
+```
+

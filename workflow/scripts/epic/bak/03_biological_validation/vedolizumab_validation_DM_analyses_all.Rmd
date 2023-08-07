@@ -1,0 +1,1686 @@
+---
+title: "DM analyses response"
+author: "Andrew Y.F. Li Yim"
+date: "6 November 2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+In this report we will perform the differential methylation analyses on responders and non-responders towards the integrin \alpha4\beta7 agonist vedolizumab. 
+
+```{r packages}
+require(minfi)
+require(sva)
+
+source("src/DM_analyses/dmr_plot.R")
+source("src/DM_analyses/dmg_plot.R")
+source("src/DM_analyses/dmr_effect_plot.R")
+```
+
+```{r setup, echo = FALSE}
+#setup input directories
+samplesDir <- file.path("data","samples", "02_validation")
+
+#setup output directories
+outputDir <- file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211113")
+dir.create(outputDir)
+dmpDir <- file.path(outputDir, "dmps")
+dir.create(dmpDir)
+dmrDir <- file.path(outputDir, "dmrs")
+dir.create(dmrDir)
+rdsDir <- file.path(outputDir, "rds")
+dir.create(rdsDir)
+```
+
+```{r import all data}
+samples_all <- readxl::read_excel(file.path(samplesDir, "total", "samples_vedolizumab_discval_total.xlsx"))
+
+samples_all$Basename <- samples_all$Filepath
+samples_all$resptime <- with(samples_all, paste0(Response, "_", Timepoint))
+samples_all$resptime[samples_all$Cohort == "Validation"] <- samples_all$Timepoint[samples_all$Cohort == "Validation"]
+
+rgset_vedodiscval <- read.metharray.exp(targets = samples_all, force = T)
+rgset_vedodiscval_noF241 <- rgset_vedodiscval[,which(pData(rgset_vedodiscval)$Biobank_ID != "F241")]
+```
+
+# Exploratory data analysis
+
+```{r Quality control, echo = FALSE}
+edaDir <- file.path(outputDir, "eda")
+dir.create(edaDir)
+```
+
+## Blood cell distribution estimation
+
+The next few steps will include blood cell estimation, normalization and subsequent differential methylation analysis after which we will perform enrichment analysis. The final step is to build a classifier using the raw data.
+
+```{r Blood cell distribution}
+require(FlowSorted.Blood.EPIC)
+require(ExperimentHub)
+
+if(!file.exists(file.path(edaDir, "estimatedCellProportion.csv"))){
+  hub <- ExperimentHub()
+  FlowSorted.Blood.EPIC <- hub[["EH1136"]]
+  
+  cellDist <- estimateCellCounts(rgset_vedodiscval_noF241, 
+                                 cellTypes = c("CD8T", "CD4T", "NK", "Bcell", "Mono", "Neu"),
+                                 compositeCellType = "Blood",
+                                 processMethod = "auto", 
+                                 probeSelect = "auto",
+                                 referencePlatform = c("IlluminaHumanMethylationEPIC"))
+  cellDist <- data.frame(cellDist, 
+                         response = pData(rgset_vedodiscval_noF241)$Response,
+                         timepoint = pData(rgset_vedodiscval_noF241)$Timepoint,
+                         donor = pData(rgset_vedodiscval_noF241)$Biobank_ID,
+                         array = rownames(cellDist))
+  write.csv(cellDist, file.path(edaDir, "estimatedCellProportion.csv"))
+} else{
+  cellDist <- read.csv(file.path(edaDir, "estimatedCellProportion.csv"), row.names = 1, stringsAsFactors = F)
+}
+
+cellDist_melt <- reshape2::melt(cellDist, id.vars = c("response", "timepoint", "array", "donor"), value.name = "Proportion")
+
+cellDist_plot <- ggplot(cellDist_melt, aes(x = timepoint, y = Proportion, col = response)) +
+  geom_point(aes(group = donor), alpha = 0.25, show.legend = F) +
+  geom_line(aes(group = donor, alpha = 0.25), linetype = "dotted", show.legend = F) +
+  geom_smooth(method = "lm", aes(group = response), se = F) +
+  scale_color_manual(values = response_cols) +
+  facet_wrap(~variable) +
+  xlab("Timepoint") +
+  theme_bw() +
+  #scale_x_continuous(breaks=seq(0,3,1)) +
+  theme(legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom",
+        text = element_text(size = 12))
+
+Cairo(width = 1500, height = 1000, type = "pdf", file = file.path(edaDir, "estimatedCellProportion.pdf"), bg = "white", units = "px", dpi = 120)
+print(cellDist_plot)
+dev.off()
+```
+
+The estimated cell distribution does not show very large differences, suggesting that any changes do not occur in the blood-associated CpGs.
+
+In the next few chunks, we will perform comparative differential methylation analyses. TWe will need to perform some degree of preprocessing. Usually we would remove probes binding to CpGs that lie on genetic variants, but this time we retain them as we are searching for biomarkers representative of response regardless of modality. Subsequent investigation will need to uncover the source of the signal.
+
+```{r vedo preprocessing}
+rgset_selected <- rgset_vedodiscval[,pData(rgset_vedodiscval)$Timepoint %in% c("T1", "T2")]
+rgset_vedodiscval_noF241 <- rgset_selected[,pData(rgset_selected)$Biobank_ID != "F241"]
+
+gmset_discval <- preprocessFunnorm(rgSet = rgset_vedodiscval_noF241)
+#gmset_discval_processed <- gmset_discval[with(getSnpInfo(gmset_discval), which(CpG_maf < 0.01 | is.na(CpG_maf))),]
+#gmset_discval_processed <- gmset_discval[with(getSnpInfo(gmset_discval), which(SBE_maf < 0.01 | is.na(SBE_maf))),]
+#gmset_discval_processed <- gmset_discval[-which(minfi::getAnnotation(gmset_discval)$chr %in% c("chrX", "chrY")),]
+
+betas_discval <- getBeta(gmset_discval)
+mvals_discval <- getM(gmset_discval)
+
+saveRDS(gmset_discval_processed, file.path(rdsDir, "gmset_discval_filtered.Rds"))
+```
+
+```{r vedo beta PCA}
+betas_discval_dm <- betas_discval - rowMeans(betas_discval)
+betas_discval_svd <- svd(t(betas_discval_dm))
+betas_discval_svd_expvar <- round(betas_discval_svd$d/sum(betas_discval_svd$d), 2)*100
+
+betas_discval_svd_df <- data.frame(Sample_ID = pData(gmset_discval)$SXS_POS,
+                                   Sentrix_ID = gsub("([0-9]+)_R[0-9]{2}C[0-9]{2}", "\\1", pData(gmset_discval)$SXS_POS),
+                                   Sentrix_Pos = gsub("[0-9]+_(R[0-9]{2}C[0-9]{2})", "\\1", pData(gmset_discval)$SXS_POS),
+                                   Origin = pData(gmset_discval)$Biobank_ID,
+                                   Cohort = pData(gmset_discval)$Cohort,
+                                   Timepoint = pData(gmset_discval)$Timepoint,
+                                   Response = pData(gmset_discval)$Response,
+                                   Sex = pData(gmset_discval)$predictedSex,
+                                   Age = pData(gmset_discval)$Age_baseline,
+                                   PC1 = betas_discval_svd$u[,1],
+                                   PC2 = betas_discval_svd$u[,2])
+
+betas_vedo_svd_plotobj <- ggplot(betas_discval_svd_df, aes(x = PC1, y = PC2)) +
+  geom_point(aes(col = Cohort, shape = Response), size = 3) +
+  theme_bw() +
+  #facet_wrap(~Timepoint) +
+  labs(title = "PCA: Functional normalization",
+       subtitle = "All timepoints",
+       x = paste0("PC1 (", betas_discval_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", betas_discval_svd_expvar[2], "%)")) +
+  #scale_shape_manual(values = c(T1 = 21, T2 = 22, T3 = 24)) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+
+Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(edaDir, "PCA.pdf"), bg = "white", units = "px", dpi = 120)
+print(betas_vedo_svd_plotobj)
+dev.off()
+```
+
+```{r}
+pdata_ukb <- pData(gmset_ukb) %>%
+  data.frame() %>%
+  dplyr::mutate(predictedSex = ifelse(predictedSex == "F", "Female", "Male"),
+                sexmatch = ifelse(Sex == predictedSex, NA, Biobank_ID))
+
+Cairo(width = 1000, height = 1000, type = "pdf", file = file.path("sex_mismatch"), bg = "white", units = "px", dpi = 120)
+ggplot(pdata_ukb, aes(x = xMed, y = yMed, col = Sex)) +
+  geom_point() +
+  geom_label_repel(aes(label = sexmatch)) +
+  theme_bw()
+dev.off()
+```
+
+Some samples have failed after discussing with Alexandra Noble.
+
+```{r failed sample removal}
+gmset_discval_cleaned <- gmset_discval[,-which(pData(gmset_discval)$Biobank_ID %in% c("IBD1748CAM", "IBD0078OUH", "IBD0274WSU", "K009399Q", "IBD0266OUH", "IBD0496SMK", "IBD0051RHA"))]
+betas_discval <- getBeta(gmset_discval_cleaned)
+```
+
+
+```{r}
+summary(aov(PC2~Cohort+Sentrix_Pos, data = betas_discval_svd_df))
+```
+
+There appears to be an observable difference between in the different cohorts. This is understandable, as both cohorts were run separately. We will next try to remove these batch effects using ComBat.
+
+```{r combat normalization}
+betas_discval_combat_c <- ComBat(dat = betas_discval, 
+                                 batch = pData(gmset_discval_cleaned)$Cohort, 
+                                 mod = NULL)
+betas_discval_combat_cs <- ComBat(dat = betas_discval_combat_c, 
+                                  batch = gsub("([0-9]+)_R[0-9]{2}C[0-9]{2}", "\\1", pData(gmset_discval_cleaned)$SXS_POS), 
+                                  mod = NULL)
+betas_discval_combat_csp <- ComBat(dat = betas_discval_combat_cs, 
+                                   batch = gsub("[0-9]+_(R[0-9]{2}C[0-9]{2})", "\\1", pData(gmset_discval_cleaned)$SXS_POS), 
+                                   mod = NULL)
+
+betas_discval_combat_csp_bcd <- limma::removeBatchEffect(x = betas_discval_combat_csp, 
+                                                  covariates = model.matrix(~CD8T+CD4T+NK+Bcell+Mono+Neu, cellDist))
+
+
+
+#betas_discval_combat_s <- ComBat(dat = betas_discval, 
+#                                 batch = gsub("([0-9]+)_R[0-9]{2}C[0-9]{2}", "\\1", pData(gmset_discval)$SXS_POS), 
+#                                 mod = NULL)
+#betas_discval_combat_sc <- ComBat(dat = betas_discval_combat_s, 
+#                                  batch = pData(gmset_discval)$Cohort, 
+#                                  mod = NULL)
+```
+
+```{r}
+S203740920093_R01C01 <- data.frame(cohort_slide = betas_discval_combat_sc[,1],
+                                   slide_cohort = betas_discval_combat_cs[,1])
+
+Cairo(width = 1000, height = 1250, type = "pdf", file = file.path("203740920093_R01C01.pdf"), bg = "white", units = "px", dpi = 120)
+ggplot(S203740920093_R01C01, aes(x = cohort_slide, y = slide_cohort)) +
+  geom_abline(intercept = 0, slope = 1, alpha = 0.5, linetype = "dashed") +
+  geom_point_rast(alpha = 0.5) +
+  labs(title = "203740920093_R01C01",
+       y = "1st: Slide, 2nd: Cohort",
+       x = "1st: Cohort, 2nd: Slide") +
+  xlim(-0.1, 1.1) +
+  ylim(-0.1, 1.1) +
+  theme_bw()
+dev.off()
+
+for(i in 1:ncol(betas_discval_combat_sc)){print(summary(betas_discval_combat_sc[,i]-betas_discval_combat_cs[,i]))}
+```
+
+```{r combat cohort pca}
+betas_discval_combat_c_dm <- betas_discval_combat_c - rowMeans(betas_discval_combat_c)
+betas_discval_combat_c_svd <- svd(t(betas_discval_combat_c_dm))
+betas_discval_combat_c_svd_expvar <- round(betas_discval_combat_c_svd$d/sum(betas_discval_combat_c_svd$d), 2)*100
+
+betas_discval_combat_c_svd_df <- data.frame(Sample_ID = pData(gmset_discval)$SXS_POS,
+                                            Sentrix_ID = gsub("([0-9]+)_R[0-9]{2}C[0-9]{2}", "\\1", pData(gmset_discval)$SXS_POS),
+                                            Sentrix_Pos = gsub("[0-9]+_(R[0-9]{2}C[0-9]{2})", "\\1", pData(gmset_discval)$SXS_POS),
+                                            Origin = pData(gmset_discval)$Biobank_ID,
+                                            Cohort = pData(gmset_discval)$Cohort,
+                                            Timepoint = pData(gmset_discval)$Timepoint,
+                                            Response = pData(gmset_discval)$Response,
+                                            Sex = pData(gmset_discval)$predictedSex,
+                                            Age = pData(gmset_discval)$Age_baseline,
+                                            PC1 = betas_discval_combat_c_svd$u[,1],
+                                            PC2 = betas_discval_combat_c_svd$u[,2])
+
+betas_discval_combat_c_svd_plotobj <- ggplot(betas_discval_combat_c_svd_df, aes(x = PC1, y = PC2)) +
+  geom_point(aes(col = Cohort, shape = Response), size = 3) +
+  theme_bw() +
+  #facet_wrap(~Timepoint) +
+  labs(title = "PCA: Functional normalization + ComBat (discovery/validation)",
+       subtitle = "All timepoints",
+       x = paste0("PC1 (", betas_discval_combat_c_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", betas_discval_combat_c_svd_expvar[2], "%)")) +
+  #scale_shape_manual(values = c(T1 = 21, T2 = 22, T3 = 24)) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+```{r combat cohort slide pca}
+betas_discval_combat_cs_dm <- betas_discval_combat_cs - rowMeans(betas_discval_combat_cs)
+betas_discval_combat_cs_svd <- svd(t(betas_discval_combat_cs_dm))
+betas_discval_combat_cs_svd_expvar <- round(betas_discval_combat_cs_svd$d/sum(betas_discval_combat_cs_svd$d), 2)*100
+
+betas_discval_combat_cs_svd_df <- data.frame(Sample_ID = pData(gmset_discval)$SXS_POS,
+                                   Sentrix_ID = gsub("([0-9]+)_R[0-9]{2}C[0-9]{2}", "\\1", pData(gmset_discval)$SXS_POS),
+                                   Sentrix_Pos = gsub("[0-9]+_(R[0-9]{2}C[0-9]{2})", "\\1", pData(gmset_discval)$SXS_POS),
+                                   Origin = pData(gmset_discval)$Biobank_ID,
+                                   Cohort = pData(gmset_discval)$Cohort,
+                                   Timepoint = pData(gmset_discval)$Timepoint,
+                                   Response = pData(gmset_discval)$Response,
+                                   Sex = pData(gmset_discval)$predictedSex,
+                                   Age = pData(gmset_discval)$Age_baseline,
+                                   PC1 = betas_discval_combat_cs_svd$u[,1],
+                                   PC2 = betas_discval_combat_cs_svd$u[,2])
+
+betas_discval_combat_cs_svd_plotobj <- ggplot(betas_discval_combat_cs_svd_df, aes(x = PC1, y = PC2)) +
+  geom_point(aes(col = Cohort, shape = Response), size = 3) +
+  theme_bw() +
+  #facet_wrap(~Timepoint) +
+  labs(title = "PCA: Functional normalization + ComBat (discovery/validation, slide)",
+       subtitle = "All timepoints",
+       x = paste0("PC1 (", betas_discval_combat_cs_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", betas_discval_combat_cs_svd_expvar[2], "%)")) +
+  #scale_shape_manual(values = c(T1 = 21, T2 = 22, T3 = 24)) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+```{r combat cohort slide pos pca}
+betas_discval_combat_csp_dm <- betas_discval_combat_csp - rowMeans(betas_discval_combat_csp)
+betas_discval_combat_csp_svd <- svd(t(betas_discval_combat_csp_dm))
+betas_discval_combat_csp_svd_expvar <- round(betas_discval_combat_csp_svd$d/sum(betas_discval_combat_csp_svd$d), 2)*100
+
+betas_discval_combat_csp_svd_df <- data.frame(Sample_ID = pData(gmset_discval_cleaned)$SXS_POS,
+                                   Sentrix_ID = gsub("([0-9]+)_R[0-9]{2}C[0-9]{2}", "\\1", pData(gmset_discval_cleaned)$SXS_POS),
+                                   Sentrix_Pos = gsub("[0-9]+_(R[0-9]{2}C[0-9]{2})", "\\1", pData(gmset_discval_cleaned)$SXS_POS),
+                                   Origin = pData(gmset_discval_cleaned)$Biobank_ID,
+                                   Cohort = pData(gmset_discval_cleaned)$Cohort,
+                                   Timepoint = pData(gmset_discval_cleaned)$Timepoint,
+                                   Response = pData(gmset_discval_cleaned)$Response,
+                                   Sex = pData(gmset_discval_cleaned)$predictedSex,
+                                   Age = pData(gmset_discval_cleaned)$Age_baseline,
+                                   PC1 = betas_discval_combat_csp_svd$u[,1],
+                                   PC2 = betas_discval_combat_csp_svd$u[,2])
+
+betas_discval_combat_csp_svd_plotobj <- ggplot(betas_discval_combat_csp_svd_df, aes(x = PC1, y = PC2)) +
+  geom_point(aes(col = Cohort, shape = Response), size = 3) +
+  theme_bw() +
+  #facet_wrap(~Timepoint) +
+  labs(title = "PCA: Functional normalization + ComBat (discovery/validation, slide, position)",
+       subtitle = "All timepoints",
+       x = paste0("PC1 (", betas_discval_combat_csp_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", betas_discval_combat_csp_svd_expvar[2], "%)")) +
+  #scale_shape_manual(values = c(T1 = 21, T2 = 22, T3 = 24)) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+```{r}
+Cairo(width = 3000, height = 3250, type = "pdf", file = file.path("pca.pdf"), bg = "white", units = "px", dpi = 120)
+ggarrange(betas_vedo_svd_plotobj, betas_discval_combat_c_svd_plotobj, betas_discval_combat_cs_svd_plotobj, betas_discval_combat_csp_svd_plotobj, 
+          nrow = 2, 
+          ncol = 2, 
+          align = "hv", 
+          legend = "bottom", 
+          common.legend = T)
+dev.off()
+```
+
+# HORAIZON
+
+```{r horaizon discval selection}
+rgset_selected <- rgset_vedodiscval[,pData(rgset_vedodiscval)$Timepoint %in% c("T1", "T2")]
+
+rgset_vedodiscval_noF241 <- rgset_selected[,pData(rgset_selected)$Biobank_ID != "F241"]
+```
+
+## Discovery (old method; noob no SNP no gap)
+
+```{r old features}
+features_old <- read.csv("output/DM_analyses/01_discovery/191106/processed_data/features_noSNP_nogap.csv") %>%
+  dplyr::mutate(cgid = gsub("^(.+?)_.+$", "\\1", Response))
+```
+
+```{r horaizon discovery old method}
+rgset_vedodisc_old <- rgset_vedodiscval_noF241[,pData(rgset_vedodiscval_noF241)$Cohort == "Discovery"]
+
+vedodisc_old_dir <- file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "discovery_old")
+dir.create(vedodisc_old_dir)
+
+vedodisc_old <- rkgreslib::preprocessHoraizon(rgset = rgset_vedodisc_old,
+                                              colname_of_interest = "Response", 
+                                              variable_of_interest = "R",
+                                              allosome_removal = F, 
+                                              snp_removal = F,
+                                              gap_removal = F)
+
+vedodisc_old_noSNP_nogap <- vedodisc_old$X[,c(1, which(gsub("^(.+?)_.+$", "\\1", colnames(vedodisc_old$X)) %in% features_old$cgid))]
+
+data.table::fwrite(vedodisc_old_noSNP_nogap, 
+                   file.path(vedodisc_old_dir, "All_disc_noob_noSNP_nogap_X.csv"))
+
+vedodisc_old_noSNP_nogap_sample_metadata <- data.frame(DonorID = pData(rgset_vedodisc_old)$Biobank_ID,
+                                                       Timepoint = pData(rgset_vedodisc_old)$Timepoint,
+                                                       Response = pData(rgset_vedodisc_old)$Response,
+                                                       Cohort = "Discovery",
+                                                       row.names = colnames(rgset_vedodisc_old))
+
+write.csv(vedodisc_old_noSNP_nogap_sample_metadata, 
+          file.path(vedodisc_old_dir, "All_disc_noob_noSNP_nogap_sample_metadata.csv"))
+
+```
+
+```{r horaizon validation T1 old method}
+rgset_vedodisc_t1 <- rgset_vedodisc_old[,pData(rgset_vedodisc_old)$Timepoint == "T1"]
+
+vedodisc_t1_old_noSNP_nogap <- vedodisc_old_noSNP_nogap[colnames(rgset_vedodisc_t1),]
+
+data.table::fwrite(vedodisc_t1_old_noSNP_nogap, 
+                   file.path(vedodisc_old_dir, "T1_disc_noob_noSNP_nogap_X.csv"))
+
+vedodisc_t1_old_noSNP_nogap_sample_metadata <- vedodisc_old_noSNP_nogap_sample_metadata[rownames(vedodisc_t1_old_noSNP_nogap),]
+
+write.csv(vedodisc_t1_old_noSNP_nogap_sample_metadata, 
+          file.path(vedodisc_old_dir, "T1_disc_noob_noSNP_nogap_sample_metadata.csv"))
+```
+
+```{r horaizon validation T2 old method}
+rgset_vedodisc_t2 <- rgset_vedodisc_old[,pData(rgset_vedodisc_old)$Timepoint == "T2"]
+
+vedodisc_t2_old_noSNP_nogap <- vedodisc_old_noSNP_nogap[colnames(rgset_vedodisc_t2),]
+
+data.table::fwrite(vedodisc_t2_old_noSNP_nogap, 
+                   file.path(vedodisc_old_dir, "T2_disc_noob_noSNP_nogap_X.csv"))
+
+vedodisc_t2_old_noSNP_nogap_sample_metadata <- vedodisc_old_noSNP_nogap_sample_metadata[rownames(vedodisc_t2_old_noSNP_nogap),]
+
+write.csv(vedodisc_t2_old_noSNP_nogap_sample_metadata, 
+          file.path(vedodisc_old_dir, "T2_disc_noob_noSNP_nogap_sample_metadata.csv"))
+```
+
+## Validation (old method; noob no SNP no gap)
+
+```{r horaizon validation old method}
+rgset_vedoval_old <- rgset_vedodiscval_noF241[,pData(rgset_vedodiscval_noF241)$Cohort == "Validation"]
+
+vedoval_old_dir <- file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "validation_old")
+dir.create(vedoval_old_dir)
+
+vedoval_old <- rkgreslib::preprocessHoraizon(rgset = rgset_vedoval_old,
+                                              colname_of_interest = "Response", 
+                                              variable_of_interest = "R",
+                                              allosome_removal = F, 
+                                              snp_removal = F,
+                                              gap_removal = F)
+
+vedoval_old_noSNP_nogap <- vedoval_old$X[,c(1, which(gsub("^(.+?)_.+$", "\\1", colnames(vedoval_old$X)) %in% features_old$cgid))]
+
+data.table::fwrite(vedoval_old_noSNP_nogap, 
+                   file.path(vedoval_old_dir, "All_val_noob_noSNP_nogap_X.csv"))
+
+vedoval_old_noSNP_nogap_sample_metadata <- data.frame(DonorID = pData(rgset_vedoval_old)$Biobank_ID,
+                                                      Timepoint = pData(rgset_vedoval_old)$Timepoint,
+                                                      Response = NA,
+                                                      Cohort = "Validation",
+                                                      row.names = colnames(rgset_vedoval_old))
+
+write.csv(vedoval_old_noSNP_nogap_sample_metadata, 
+          file.path(vedoval_old_dir, "All_val_noob_noSNP_nogap_sample_metadata.csv"))
+
+```
+
+```{r horaizon validation T1 old method}
+rgset_vedoval_t1 <- rgset_vedoval_old[,pData(rgset_vedoval_old)$Timepoint == "T1"]
+
+vedoval_t1_old_noSNP_nogap <- vedoval_old_noSNP_nogap[colnames(rgset_vedoval_t1),]
+
+data.table::fwrite(vedoval_t1_old_noSNP_nogap, 
+                   file.path(vedoval_old_dir, "T1_val_noob_noSNP_nogap_X.csv"))
+
+vedoval_t1_old_noSNP_nogap_sample_metadata <- vedoval_old_noSNP_nogap_sample_metadata[rownames(vedoval_t1_old_noSNP_nogap),]
+
+write.csv(vedoval_t1_old_noSNP_nogap_sample_metadata, 
+          file.path(vedoval_old_dir, "T1_val_noob_noSNP_nogap_sample_metadata.csv"))
+```
+
+```{r horaizon validation T2 old method}
+rgset_vedoval_t2 <- rgset_vedoval_old[,pData(rgset_vedoval_old)$Timepoint == "T2"]
+
+vedoval_t2_old_noSNP_nogap <- vedoval_old_noSNP_nogap[colnames(rgset_vedoval_t2),]
+
+data.table::fwrite(vedoval_t2_old_noSNP_nogap, 
+                   file.path(vedoval_old_dir, "T2_val_noob_noSNP_nogap_X.csv"))
+
+vedoval_t2_old_noSNP_nogap_sample_metadata <- vedoval_old_noSNP_nogap_sample_metadata[rownames(vedoval_t2_old_noSNP_nogap),]
+
+write.csv(vedoval_t2_old_noSNP_nogap_sample_metadata, 
+          file.path(vedoval_old_dir, "T2_val_noob_noSNP_nogap_sample_metadata.csv"))
+```
+
+## Validation (new method; noob no SNP no gap)
+
+```{r horaizon validation}
+rgset_vedoval_horaizon <- rkgreslib::preprocessHoraizon(rgset = rgset_vedodiscval_noF241,
+                                                        colname_of_interest = "Response", 
+                                                        variable_of_interest = "R",
+                                                        allosome_removal = T, 
+                                                        snp_removal = F, 
+                                                        outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_betas_noob"))
+
+write.csv(data.frame(DonorID = pData(rgset_vedoval)$Biobank_ID,
+                     Timepoint = pData(rgset_vedoval)$Timepoint,
+                     row.names = colnames(rgset_vedoval)), 
+          file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_betas_noob", "sample_metadata.csv"))
+```
+
+```{r horaizon validation T1}
+rgset_vedoval_t1 <- rgset_vedoval_noF241[,pData(rgset_vedoval_noF241)$Timepoint == "T1"]
+
+rgset_vedoval_t1_horaizon <- rkgreslib::preprocessHoraizon(rgset = rgset_vedoval_t1,
+                                                           colname_of_interest = "Response", 
+                                                           variable_of_interest = "R",
+                                                           allosome_removal = T, 
+                                                           snp_removal = F, 
+                                                           outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T1_betas_noob"))
+
+rgset_vedoval_t1_horaizon$X[,1] <- rgset_vedoval_t1$Biobank_ID
+
+data.table::fwrite(rgset_vedoval_t1_horaizon$X, 
+                   file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T1_betas_noob", "X.csv"))
+
+write.csv(data.frame(DonorID = pData(rgset_vedoval_t1)$Biobank_ID,
+                     Timepoint = pData(rgset_vedoval_t1)$Timepoint,
+                     row.names = colnames(rgset_vedoval_t1)), 
+          file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T1_betas_noob", "T1_sample_metadata.csv"))
+```
+
+```{r horaizon validation T2}
+rgset_vedoval_t2 <- rgset_vedoval_noF241[,pData(rgset_vedoval_noF241)$Timepoint == "T2"]
+
+rgset_vedoval_t2_horaizon <- rkgreslib::preprocessHoraizon(rgset = rgset_vedoval_t2,
+                                                           colname_of_interest = "Response", 
+                                                           variable_of_interest = "R",
+                                                           allosome_removal = T, 
+                                                           snp_removal = F, 
+                                                           outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T2_betas_noob"))
+
+rgset_vedoval_t2_horaizon$X[,1] <- rgset_vedoval_t2$Biobank_ID
+
+data.table::fwrite(rgset_vedoval_t2_horaizon$X, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T2_betas_noob", "X.csv"))
+
+write.csv(data.frame(DonorID = pData(rgset_vedoval_t2)$Biobank_ID,
+                     Timepoint = pData(rgset_vedoval_t2)$Timepoint,
+                     row.names = colnames(rgset_vedoval_t2)), 
+          file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T2_betas_noob", "T2_sample_metadata.csv"))
+```
+
+```{r horaizon performance binary}
+vedoval_predictions_t1 <- as.data.frame(readxl::read_excel(file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "predictions.xlsx")))
+
+predstats <- function(predicted, actual){
+  confusion_matrix <- data.frame(table(predicted = predicted, actual = actual))
+  
+  prediction_stats <- data.frame(TP = confusion_matrix$Freq[4],
+                                 TN = confusion_matrix$Freq[1],
+                                 FP = confusion_matrix$Freq[2],
+                                 FN = confusion_matrix$Freq[3]) %>%
+    dplyr::mutate(Precision = TP/(TP+FP),
+                  Recall = TP/(TP+FN),
+                  Accuracy = (TP+TN)/(TP+FP+FN+TN),
+                  F1score = 2*(Recall*Precision)/(Recall+Precision))
+  
+  return(prediction_stats)
+}
+
+vedoval_predictionstats <- foreach(i = 3:ncol(vedoval_predictions_t1), .combine = rbind) %do%
+  predstats(predicted = vedoval_predictions_t1[,i], 
+            actual = as.character(vedoval_predictions_t1$Actual))
+
+rownames(vedoval_predictionstats) <- paste0("model", 1:10)
+
+write.csv(vedoval_predictionstats, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "predictions_stats.csv"))
+```
+
+```{r horaizon performance probabilities}
+require(plotROC)
+
+vedoval_prediction_probabilities_t1 <- as.data.frame(readxl::read_excel(file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "210906", "horaizon", "predictions_probabilities.xlsx")))
+
+vedoval_prediction_probabilities_t1 <- merge(data.frame(pData(rgset_vedoval_t1)[,c("Biobank_ID", "Response")]), vedoval_prediction_probabilities_t1, by.x = "Biobank_ID", by.y = "SampleID")
+vedoval_prediction_probabilities_t1$Response_bin <- (vedoval_prediction_probabilities_t1$Response == "R")*1
+
+Cairo(width = 1250, height = 1250, type = "pdf", file = file.path("model2_ROC.pdf"), bg = "white", units = "px", dpi = 120)
+ggplot(vedoval_prediction_probabilities_t1, aes(m = Model2, d = Response_bin)) +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  theme_bw() +
+  labs(title = "Model 2",
+       y = "TPR",
+       x = "FPR")
+dev.off()
+
+Cairo(width = 1250, height = 1250, type = "pdf", file = file.path("model10_ROC.pdf"), bg = "white", units = "px", dpi = 120)
+ggplot(vedoval_prediction_probabilities_t1, aes(m = Model10, d = Response_bin)) +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  theme_bw() +
+  labs(title = "Model 10",
+       y = "TPR",
+       x = "FPR")
+dev.off()
+
+Cairo(width = 1500, height = 1250, type = "pdf", file = file.path("model_both_ROC.pdf"), bg = "white", units = "px", dpi = 120)
+vedoval_prediction_probabilities_t1 %>%
+  tidyr::pivot_longer(-c(Biobank_ID, Response, Response_bin), names_to = "Model", values_to = "Probabilities") %>%
+  ggplot(aes(m = Probabilities, d = Response, col = Model)) +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  theme_bw() +
+  labs(y = "TPR",
+       x = "FPR")
+dev.off()
+
+```
+
+## Discovery and validation (normalized together)
+
+```{r horaizon all}
+vedodiscval_horaizon <- rkgreslib::preprocessHoraizon(rgset = rgset_vedodiscval_noF241,
+                                                      colname_of_interest = "Response", 
+                                                      variable_of_interest = "R",
+                                                      allosome_removal = T, 
+                                                      snp_removal = F, 
+                                                      outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discval"))
+
+vedodiscval_horaizon_samples <- data.frame(DonorID = pData(rgset_vedodiscval_noF241)$Biobank_ID,
+                                           Timepoint = pData(rgset_vedodiscval_noF241)$Timepoint,
+                                           Response = pData(rgset_vedodiscval_noF241)$Response,
+                                           Cohort = pData(rgset_vedodiscval_noF241)$Cohort,
+                                           row.names = colnames(rgset_vedodiscval_noF241)) %>%
+  dplyr::mutate(Response = ifelse(Cohort == "Validation", NA, Response))
+
+write.csv(vedodiscval_horaizon_samples, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discval", "samples_metadata.csv"))
+```
+
+```{r horaizon T1}
+vedodiscval_horaizon_samples_T1 <- vedodiscval_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodiscval_horaizon_samples, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discval", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T1_betas_noob_discval_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_horaizon$X[rownames(vedodiscval_horaizon_samples_T1),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discval", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T1_betas_noob_discval.csv"))
+```
+
+```{r horaizon T2}
+vedodiscval_horaizon_samples_T2 <- vedodiscval_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodiscval_horaizon_samples_T2, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discval", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T2_betas_noob_discval_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_horaizon$X[rownames(vedodiscval_horaizon_samples_T2),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discval", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T2_betas_noob_discval.csv"))
+```
+
+## Discovery and validation (normalized together; stricter SNP removal)
+
+```{r horaizon discval selection}
+rgset_selected <- rgset_vedodiscval[,pData(rgset_vedodiscval)$Timepoint %in% c("T1", "T2")]
+
+rgset_vedodiscval_noF241 <- rgset_selected[,pData(rgset_selected)$Biobank_ID != "F241"]
+```
+
+```{r horaizon all}
+vedodiscval_gh0.1_horaizon <- rkgreslib::preprocessHoraizon(rgset = rgset_vedodiscval_noF241,
+                                                      colname_of_interest = "Response", 
+                                                      variable_of_interest = "R",
+                                                      allosome_removal = T, 
+                                                      snp_removal = T, 
+                                                      min_maf = 0,
+                                                      gap_removal = T,
+                                                      gap_threshold = 0.1,
+                                                      #outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_betas_noob_discval_gh010")
+                                                      )
+
+vedodiscval_gh0.1_horaizon_samples <- data.frame(DonorID = pData(rgset_vedodiscval_noF241)$Biobank_ID,
+                                                 Timepoint = pData(rgset_vedodiscval_noF241)$Timepoint,
+                                                 Response = pData(rgset_vedodiscval_noF241)$Response,
+                                                 Cohort = pData(rgset_vedodiscval_noF241)$Cohort,
+                                                 row.names = colnames(rgset_vedodiscval_noF241))
+
+vedodiscval_gh0.1_horaizon_samples <- vedodiscval_gh0.1_horaizon_samples %>%
+  dplyr::mutate(Response = ifelse(Cohort == "Validation", NA, Response))
+
+write.csv(vedodiscval_gh0.1_horaizon_samples, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_betas_noob_discval_gh010", "samples_metadata.csv"))
+```
+
+```{r horaizon T1}
+vedodiscval_gh0.1_horaizon_samples_T1 <- vedodiscval_gh0.1_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodiscval_gh0.1_horaizon_samples_T1, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T1_betas_noob_discval_gh010_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_gh0.1_horaizon$X[rownames(vedodiscval_gh0.1_horaizon_samples_T1),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T1_betas_noob_discval_gh010.csv"))
+```
+
+```{r horaizon T2}
+vedodiscval_gh0.1_horaizon_samples_T2 <- vedodiscval_gh0.1_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodiscval_gh0.1_horaizon_samples_T2, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T2_betas_noob_discval_gh010_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_gh0.1_horaizon$X[rownames(vedodiscval_gh0.1_horaizon_samples_T2),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_validation_T2_betas_noob_discval_gh010.csv"))
+```
+
+## Discovery and validation (normalized together with funnorm; stricter SNP removal)
+
+```{r horaizon funnorm gh010}
+vedodiscval_gh0.1_funnorm_horaizon <- preprocessHoraizon(rgset = rgset_vedodiscval_noF241,
+                                                         method = "funnorm",
+                                                         colname_of_interest = "Response", 
+                                                         variable_of_interest = "R",
+                                                         allosome_removal = T, 
+                                                         snp_removal = T, 
+                                                         min_maf = 0,
+                                                         gap_removal = T,
+                                                         gap_threshold = 0.1,
+                                                         outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh010"))
+
+vedodiscval_gh0.1_funnorm_horaizon_samples <- data.frame(DonorID = pData(rgset_vedodiscval_noF241)$Biobank_ID,
+                                                         Timepoint = pData(rgset_vedodiscval_noF241)$Timepoint,
+                                                         Response = pData(rgset_vedodiscval_noF241)$Response,
+                                                         Cohort = pData(rgset_vedodiscval_noF241)$Cohort,
+                                                         row.names = colnames(rgset_vedodiscval_noF241))
+
+vedodiscval_gh0.1_funnorm_horaizon_samples <- vedodiscval_gh0.1_funnorm_horaizon_samples %>%
+  dplyr::mutate(Response = ifelse(Cohort == "Validation", NA, Response))
+
+write.csv(vedodiscval_gh0.1_funnorm_horaizon_samples, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh010", "samples_metadata.csv"))
+```
+
+```{r horaizon T1 funnorm gh010}
+vedodiscval_gh0.1_funnorm_horaizon_samples_T1 <- vedodiscval_gh0.1_funnorm_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodiscval_gh0.1_funnorm_horaizon_samples_T1, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh010",  "T1_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_gh0.1_funnorm_horaizon$X[rownames(vedodiscval_gh0.1_funnorm_horaizon_samples_T1),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh010", "T1_X.csv"))
+```
+
+```{r horaizon T2 funnorm gh010}
+vedodiscval_gh0.1_funnorm_horaizon_samples_T2 <- vedodiscval_gh0.1_funnorm_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodiscval_gh0.1_funnorm_horaizon_samples_T2, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh010",  "T2_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_gh0.1_funnorm_horaizon$X[rownames(vedodiscval_gh0.1_funnorm_horaizon_samples_T2),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh010", "T2_X.csv"))
+```
+
+## Discovery and validation (normalized together with funnorm; no SNP removal)
+
+```{r horaizon funnorm all}
+vedodiscval_funnorm_horaizon <- preprocessHoraizon(rgset = rgset_vedodiscval_noF241,
+                                                   method = "funnorm",
+                                                   colname_of_interest = "Response", 
+                                                   variable_of_interest = "R",
+                                                   allosome_removal = T, 
+                                                   snp_removal = F, 
+                                                   gap_removal = F,
+                                                   outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm"))
+
+vedodiscval_funnorm_horaizon_samples <- data.frame(DonorID = pData(rgset_vedodiscval_noF241)$Biobank_ID,
+                                                   Timepoint = pData(rgset_vedodiscval_noF241)$Timepoint,
+                                                   Response = pData(rgset_vedodiscval_noF241)$Response,
+                                                   Cohort = pData(rgset_vedodiscval_noF241)$Cohort,
+                                                   row.names = colnames(rgset_vedodiscval_noF241))
+
+vedodiscval_funnorm_horaizon_samples <- vedodiscval_funnorm_horaizon_samples %>%
+  dplyr::mutate(Response = ifelse(Cohort == "Validation", NA, Response))
+
+write.csv(vedodiscval_funnorm_horaizon_samples, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm", "samples_metadata.csv"))
+```
+
+```{r horaizon T1 funnorm}
+vedodiscval_funnorm_horaizon_samples_T1 <- vedodiscval_funnorm_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodiscval_funnorm_horaizon_samples_T1, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm",  "T1_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_funnorm_horaizon$X[rownames(vedodiscval_funnorm_horaizon_samples_T1),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm", "T1_X.csv"))
+```
+
+```{r horaizon T2 funnorm}
+vedodiscval_funnorm_horaizon_samples_T2 <- vedodiscval_funnorm_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodiscval_funnorm_horaizon_samples_T2, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm",  "T2_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_funnorm_horaizon$X[rownames(vedodiscval_funnorm_horaizon_samples_T2),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm", "T2_X.csv"))
+```
+
+## Discovery and validation (normalized together with funnorm noSNP no gap; old method)
+
+```{r horaizon funnorm old method all}
+vedodiscval_funnorm_horaizon <- preprocessHoraizon(rgset = rgset_vedodiscval_noF241,
+                                                   method = "funnorm",
+                                                   colname_of_interest = "Response", 
+                                                   variable_of_interest = "R",
+                                                   allosome_removal = T, 
+                                                   snp_removal = F, 
+                                                   gap_removal = F)
+
+vedodiscval_funnorm_old_noSNP_nogap <- vedodiscval_funnorm_horaizon$X[,c(1, which(gsub("^(.+?)_.+$", "\\1", colnames(vedodiscval_funnorm_horaizon$X)) %in% features_old$cgid))]
+
+data.table::fwrite(vedodiscval_funnorm_old_noSNP_nogap, 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh020_(old)", "All_discval_funnorm_gh020_old_X.csv"))
+
+vedodiscval_funnorm_horaizon_samples <- data.frame(DonorID = pData(rgset_vedodiscval_noF241)$Biobank_ID,
+                                                   Timepoint = pData(rgset_vedodiscval_noF241)$Timepoint,
+                                                   Response = pData(rgset_vedodiscval_noF241)$Response,
+                                                   Cohort = pData(rgset_vedodiscval_noF241)$Cohort,
+                                                   row.names = colnames(rgset_vedodiscval_noF241))
+
+vedodiscval_funnorm_horaizon_samples <- vedodiscval_funnorm_horaizon_samples %>%
+  dplyr::mutate(Response = ifelse(Cohort == "Validation", NA, Response))
+
+write.csv(vedodiscval_funnorm_horaizon_samples, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh020_(old)", "All_discval_funnorm_gh020_old_sample_metadata.csv"))
+```
+
+```{r horaizon funnorm old method T1}
+vedodiscval_funnorm_horaizon_samples_T1 <- vedodiscval_funnorm_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodiscval_funnorm_horaizon_samples_T1, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh020_(old)",  "T1_discval_funnorm_gh020_old_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_funnorm_old_noSNP_nogap[rownames(vedodiscval_funnorm_horaizon_samples_T1),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh020_(old)", "T1_discval_funnorm_gh020_old_X.csv"))
+```
+
+```{r horaizon funnorm old method T2}
+vedodiscval_funnorm_horaizon_samples_T2 <- vedodiscval_funnorm_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodiscval_funnorm_horaizon_samples_T2, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh020_(old)",  "T2_discval_funnorm_gh020_old_sample_metadata.csv"))
+
+data.table::fwrite(vedodiscval_funnorm_old_noSNP_nogap[rownames(vedodiscval_funnorm_horaizon_samples_T2),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "vedolizumab_discval_funnorm_gh020_(old)", "T2_discval_funnorm_gh020_old_X.csv"))
+```
+
+## Discovery and validation (normalized together with funnorm and combat; stricter SNP removal)
+
+```{r preparation}
+vedodiscval_gh0.1_funnorm_combat_horaizon_metadata <- pData(gmset_discval_cleaned) %>%
+  data.frame() %>%
+  dplyr::select(Biobank_ID, SXS_POS, Timepoint, Response, Disease, Cohort)
+
+betas_discval_combat_csp_horaizon_betas <- betas_discval_combat_csp[,vedodiscval_gh0.1_funnorm_combat_horaizon_metadata$SXS_POS]
+
+snp_cpgs <- minfi::getSnpInfo(gmset_discval_cleaned)[which(minfi::getSnpInfo(gmset_discval_cleaned)$CpG_maf > 0 | minfi::getSnpInfo(gmset_discval_cleaned)$SBE_maf > 0),]
+gaps <- minfi::gaphunter(gmset_discval_cleaned, threshold = 0.1)
+
+gapped_cpgs <- rownames(gaps$proberesults)
+
+cpgs_for_removal <- unique(c(rownames(snp_cpgs), gapped_cpgs))
+
+gmset_discval_combat_horaizon <- gmset_discval_cleaned[!rownames(betas_discval_combat_csp_horaizon_betas) %in% cpgs_for_removal,]
+betas_discval_combat_csp_horaizon_betas_horaizon <- betas_discval_combat_csp_horaizon_betas[!rownames(betas_discval_combat_csp_horaizon_betas) %in% cpgs_for_removal,]
+
+annotation_discval_combat_horaizon <- minfi::getAnnotation(gmset_discval_combat_horaizon)
+allosome_probes <- rownames(annotation_discval_combat_horaizon)[annotation_discval_combat_horaizon$chr %in% c("chrX", "chrY")]
+
+gmset_discval_combat_horaizon <- gmset_discval_combat_horaizon[!rownames(gmset_discval_combat_horaizon) %in% allosome_probes,]
+betas_discval_combat_csp_horaizon_betas_horaizon <- betas_discval_combat_csp_horaizon_betas_horaizon[!rownames(betas_discval_combat_csp_horaizon_betas_horaizon) %in% allosome_probes,]
+
+genenames <- unlist(lapply(lapply(strsplit(minfi::getAnnotation(gmset_discval_combat_horaizon)$UCSC_RefGene_Name, ";"), unique),
+                           function(genes){
+                             paste(genes, collapse = ".")
+                           })
+)
+
+featurenames <- unlist(lapply(lapply(strsplit(minfi::getAnnotation(gmset_discval_combat_horaizon)$UCSC_RefGene_Group, ";"), unique),
+                              function(gfeats){
+                                paste(gfeats, collapse = ".")
+                              })
+)
+
+coordinates <- with(getAnnotation(gmset_discval_combat_horaizon), paste0(chr, ".", pos))
+
+# CpG annotations
+cpg_annotation <- paste0(rownames(gmset_discval_combat_horaizon), "_", coordinates, "_", genenames, "_", featurenames)
+cpg_annotation <- gsub("(^.+?)_+$", "\\1", cpg_annotation)
+```
+
+```{r horaizon funnorm combat gh010 All}
+vedodiscval_gh0.1_funnorm_combat_horaizon <- t(betas_discval_combat_csp_horaizon_betas_horaizon)
+colnames(vedodiscval_gh0.1_funnorm_combat_horaizon) <- cpg_annotation
+data.table::fwrite(vedodiscval_gh0.1_funnorm_combat_horaizon, "All_discval_funnorm_combat_X.csv")
+
+vedodiscval_gh0.1_funnorm_combat_horaizon_samples <- data.frame(DonorID = pData(gmset_discval_combat_horaizon)$Biobank_ID,
+                                                                Timepoint = pData(gmset_discval_combat_horaizon)$Timepoint,
+                                                                Response = pData(gmset_discval_combat_horaizon)$Response,
+                                                                Cohort = pData(gmset_discval_combat_horaizon)$Cohort,
+                                                                Disease = pData(gmset_discval_combat_horaizon)$Disease,
+                                                                row.names = colnames(gmset_discval_combat_horaizon))
+
+write.csv(vedodiscval_gh0.1_funnorm_combat_horaizon_samples, file.path("All_discval_funnorm_combat_sample_metadata.csv"))
+```
+
+```{r horaizon funnorm combat gh010 T1}
+vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T1 <- vedodiscval_gh0.1_funnorm_combat_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T1, file.path("T1_discval_funnorm_combat_sample_metadata.csv"))
+
+vedodiscval_gh0.1_funnorm_combat_horaizon_T1 <- vedodiscval_gh0.1_funnorm_combat_horaizon[rownames(vedodiscval_gh0.1_funnorm_combat_horaizon) %in% rownames(vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T1),]
+
+data.table::fwrite(vedodiscval_gh0.1_funnorm_combat_horaizon_T1, "T1_discval_funnorm_combat_X.csv")
+```
+
+```{r horaizon funnorm combat gh010 T2}
+vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T2 <- vedodiscval_gh0.1_funnorm_combat_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T2, file.path("T2_discval_funnorm_combat_sample_metadata.csv"))
+
+vedodiscval_gh0.1_funnorm_combat_horaizon_T2 <- vedodiscval_gh0.1_funnorm_combat_horaizon[rownames(vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T2),]
+
+data.table::fwrite(vedodiscval_gh0.1_funnorm_combat_horaizon_T2, "T2_discval_funnorm_combat_X.csv")
+```
+
+## Discovery and validation (normalized together with funnorm and combat with blood cell correction; stricter SNP removal)
+
+```{r preparation}
+vedodiscval_gh0.1_funnorm_combat_horaizon_metadata <- pData(gmset_discval) %>%
+  data.frame() %>%
+  dplyr::select(Biobank_ID, SXS_POS, Timepoint, Response)
+
+betas_discval_combat_csp_bcd_horaizon_betas <- betas_discval_combat_csp_bcd[,vedodiscval_gh0.1_funnorm_combat_horaizon_metadata$SXS_POS]
+
+snp_cpgs <- minfi::getSnpInfo(gmset_discval)[which(minfi::getSnpInfo(gmset_discval)$CpG_maf > 0 | minfi::getSnpInfo(gmset_discval)$SBE_maf > 0),]
+gaps <- minfi::gaphunter(gmset_discval, threshold = 0.1)
+
+gapped_cpgs <- rownames(gaps$proberesults)
+
+cpgs_for_removal <- unique(c(rownames(snp_cpgs), gapped_cpgs))
+
+gmset_discval_combat_horaizon <- gmset_discval[!rownames(betas_discval_combat_csp_bcd_horaizon_betas) %in% cpgs_for_removal,]
+betas_discval_combat_csp_bcd_horaizon_betas_horaizon <- betas_discval_combat_csp_bcd_horaizon_betas[!rownames(betas_discval_combat_csp_bcd_horaizon_betas) %in% cpgs_for_removal,]
+
+annotation_discval_combat_horaizon <- minfi::getAnnotation(gmset_discval_combat_horaizon)
+allosome_probes <- rownames(annotation_discval_combat_horaizon)[annotation_discval_combat_horaizon$chr %in% c("chrX", "chrY")]
+
+gmset_discval_combat_horaizon <- gmset_discval_combat_horaizon[!rownames(gmset_discval_combat_horaizon) %in% allosome_probes,]
+betas_discval_combat_csp_bcd_horaizon_betas_horaizon <- betas_discval_combat_csp_bcd_horaizon_betas_horaizon[!rownames(betas_discval_combat_csp_bcd_horaizon_betas_horaizon) %in% allosome_probes,]
+
+genenames <- unlist(lapply(lapply(strsplit(minfi::getAnnotation(gmset_discval_combat_horaizon)$UCSC_RefGene_Name, ";"), unique),
+                           function(genes){
+                             paste(genes, collapse = ".")
+                           })
+)
+
+featurenames <- unlist(lapply(lapply(strsplit(minfi::getAnnotation(gmset_discval_combat_horaizon)$UCSC_RefGene_Group, ";"), unique),
+                              function(gfeats){
+                                paste(gfeats, collapse = ".")
+                              })
+)
+
+coordinates <- with(getAnnotation(gmset_discval_combat_horaizon), paste0(chr, ".", pos))
+
+# CpG annotations
+cpg_annotation <- paste0(rownames(gmset_discval_combat_horaizon), "_", coordinates, "_", genenames, "_", featurenames)
+cpg_annotation <- gsub("(^.+?)_+$", "\\1", cpg_annotation)
+```
+
+```{r horaizon funnorm combat gh010 All}
+vedodiscval_gh0.1_funnorm_combat_csp_bcd_horaizon <- t(betas_discval_combat_csp_bcd_horaizon_betas_horaizon)
+colnames(vedodiscval_gh0.1_funnorm_combat_horaizon) <- cpg_annotation
+data.table::fwrite(vedodiscval_gh0.1_funnorm_combat_horaizon, "All_discval_funnorm_combat_bcd_X.csv")
+
+vedodiscval_gh0.1_funnorm_combat_horaizon_samples <- data.frame(DonorID = pData(gmset_discval_combat_horaizon)$Biobank_ID,
+                                                                Timepoint = pData(gmset_discval_combat_horaizon)$Timepoint,
+                                                                Response = pData(gmset_discval_combat_horaizon)$Response,
+                                                                Cohort = pData(gmset_discval_combat_horaizon)$Cohort,
+                                                                row.names = colnames(gmset_discval_combat_horaizon))
+
+write.csv(vedodiscval_gh0.1_funnorm_combat_horaizon_samples, file.path("All_discval_funnorm_combat_sample_metadata.csv"))
+```
+
+```{r horaizon funnorm combat gh010 T1}
+vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T1 <- vedodiscval_gh0.1_funnorm_combat_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T1, file.path("T1_discval_funnorm_combat_sample_metadata.csv"))
+
+vedodiscval_gh0.1_funnorm_combat_csp_bcd_horaizon_T1 <- vedodiscval_gh0.1_funnorm_combat_csp_bcd_horaizon[rownames(vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T1),]
+
+data.table::fwrite(vedodiscval_gh0.1_funnorm_combat_csp_bcd_horaizon_T1, "T1_discval_funnorm_combat_bcd_X.csv")
+```
+
+```{r horaizon funnorm combat gh010 T2}
+vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T2 <- vedodiscval_gh0.1_funnorm_combat_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T2, file.path("T2_discval_funnorm_combat_sample_metadata.csv"))
+
+vedodiscval_gh0.1_funnorm_combat_csp_bcd_horaizon_T2 <- vedodiscval_gh0.1_funnorm_combat_csp_bcd_horaizon[rownames(vedodiscval_gh0.1_funnorm_combat_horaizon_samples_T2),]
+
+data.table::fwrite(vedodiscval_gh0.1_funnorm_combat_csp_bcd_horaizon_T2, "T2_discval_funnorm_combat_bcd_X.csv")
+```
+
+## Discovery
+
+```{r horaizon discovery selection}
+rgset_vedodisc_noF241 <- rgset_vedodiscval_noF241[,pData(rgset_vedodiscval_noF241)$Cohort == "Discovery"]
+```
+
+### gaphunter 0.2
+
+```{r horaizon discovery}
+vedodisc_gh0.2_horaizon <- rkgreslib::preprocessHoraizon(rgset = rgset_vedodisc_noF241,
+                                                         colname_of_interest = "Response", 
+                                                         variable_of_interest = "R",
+                                                         allosome_removal = T, 
+                                                         snp_removal = T, 
+                                                         min_maf = 0,
+                                                         gap_removal = T,
+                                                         gap_threshold = 0.2,
+                                                         outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discovery_gh020"))
+
+vedodisc_gh0.2_horaizon_samples <- data.frame(DonorID = pData(rgset_vedodisc_noF241)$Biobank_ID,
+                                              Timepoint = pData(rgset_vedodisc_noF241)$Timepoint,
+                                              Response = pData(rgset_vedodisc_noF241)$Response,
+                                              Cohort = pData(rgset_vedodisc_noF241)$Cohort,
+                                              row.names = colnames(rgset_vedodisc_noF241))
+
+write.csv(vedodisc_gh0.2_horaizon_samples, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "All_disc_gh020_sample_metadata.csv"))
+```
+
+```{r horaizon discovery T1}
+vedodisc_gh0.2_horaizon_samples_T1 <- vedodisc_gh0.2_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodisc_gh0.2_horaizon_samples_T1, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T1_disc_gh020_sample_metadata.csv"))
+
+data.table::fwrite(vedodisc_gh0.2_horaizon$X[rownames(vedodisc_gh0.2_horaizon_samples_T1),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T1_disc_gh020_sample_X.csv"))
+```
+
+```{r horaizon discovery T2}
+vedodisc_gh0.2_horaizon_samples_T2 <- vedodisc_gh0.2_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodisc_gh0.2_horaizon_samples_T2, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T2_disc_gh020_sample_metadata.csv"))
+
+data.table::fwrite(vedodisc_gh0.2_horaizon$X[rownames(vedodisc_gh0.2_horaizon_samples_T2),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T2_disc_gh020_sample_X.csv"))
+```
+
+### gaphunter 0.1
+
+```{r horaizon discovery}
+vedodisc_gh0.1_horaizon <- rkgreslib::preprocessHoraizon(rgset = rgset_vedodisc_noF241,
+                                                         colname_of_interest = "Response", 
+                                                         variable_of_interest = "R",
+                                                         allosome_removal = T, 
+                                                         snp_removal = T, 
+                                                         min_maf = 0,
+                                                         gap_removal = T,
+                                                         gap_threshold = 0.1,
+                                                         outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discovery_gh010"))
+
+vedodisc_gh0.1_horaizon_samples <- data.frame(DonorID = pData(rgset_vedodisc_noF241)$Biobank_ID,
+                                                 Timepoint = pData(rgset_vedodisc_noF241)$Timepoint,
+                                                 Response = pData(rgset_vedodisc_noF241)$Response,
+                                                 Cohort = pData(rgset_vedodisc_noF241)$Cohort,
+                                                 row.names = colnames(rgset_vedodisc_noF241))
+
+write.csv(vedodisc_gh0.1_horaizon_samples, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "All_disc_gh010_sample_metadata.csv"))
+```
+
+```{r horaizon discovery T1}
+vedodisc_gh0.1_horaizon_samples_T1 <- vedodisc_gh0.1_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedodisc_gh0.1_horaizon_samples_T1, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T1_disc_gh010_sample_metadata.csv"))
+
+data.table::fwrite(vedodisc_gh0.1_horaizon$X[rownames(vedodisc_gh0.1_horaizon_samples_T1),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T1_disc_gh010_sample_X.csv"))
+```
+
+```{r horaizon discovery T2}
+vedodisc_gh0.1_horaizon_samples_T2 <- vedodisc_gh0.1_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedodisc_gh0.1_horaizon_samples_T2, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T2_disc_gh010_sample_metadata.csv"))
+
+data.table::fwrite(vedodisc_gh0.1_horaizon$X[rownames(vedodisc_gh0.1_horaizon_samples_T2),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T2_disc_gh010_sample_X.csv"))
+```
+
+## Validation
+
+```{r horaizon validation selection}
+rgset_vedoval_noF241 <- rgset_vedodiscval_noF241[,pData(rgset_vedodiscval_noF241)$Cohort == "Validation"]
+```
+
+```{r horaizon validation}
+vedoval_gh0.1_horaizon <- rkgreslib::preprocessHoraizon(rgset = rgset_vedoval_noF241,
+                                                         colname_of_interest = "Response", 
+                                                         variable_of_interest = "R",
+                                                         allosome_removal = T, 
+                                                         snp_removal = T, 
+                                                         min_maf = 0,
+                                                         gap_removal = T,
+                                                         gap_threshold = 0.1,
+                                                         outpath = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "PRJ0000008_CDMEDRESP_vedolizumab_betas_noob_discovery_gh010"))
+
+vedoval_gh0.1_horaizon_samples <- data.frame(DonorID = pData(rgset_vedoval_noF241)$Biobank_ID,
+                                             Timepoint = pData(rgset_vedoval_noF241)$Timepoint,
+                                             Response = NA,
+                                             Cohort = pData(rgset_vedoval_noF241)$Cohort,
+                                             row.names = colnames(rgset_vedoval_noF241))
+
+write.csv(vedoval_gh0.1_horaizon_samples, file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "All_val_gh010_sample_metadata.csv"))
+```
+
+```{r horaizon validation T1}
+vedoval_gh0.1_horaizon_samples_T1 <- vedoval_gh0.1_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T1")
+
+write.csv(vedoval_gh0.1_horaizon_samples_T1, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T1_val_gh010_sample_metadata.csv"))
+
+data.table::fwrite(vedoval_gh0.1_horaizon$X[rownames(vedoval_gh0.1_horaizon_samples_T1),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T1_val_gh010_sample_X.csv"))
+```
+
+```{r horaizon validation T2}
+vedoval_gh0.1_horaizon_samples_T2 <- vedoval_gh0.1_horaizon_samples %>%
+  dplyr::filter(Timepoint == "T2")
+
+write.csv(vedoval_gh0.1_horaizon_samples_T2, file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T2_val_gh010_sample_metadata.csv"))
+
+data.table::fwrite(vedoval_gh0.1_horaizon$X[rownames(vedoval_gh0.1_horaizon_samples_T2),], 
+                   file = file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "T2_val_gh010_sample_X.csv"))
+```
+
+#Figures
+
+## Report October 2019
+
+```{r 1019 figures setup}
+figDir <- file.path("docs", "reports", "vedolizumab_discovery", "figures")
+dir.create(figDir)
+```
+
+### Figure 1
+
+```{r 1019 fig1}
+fig1Dir <- file.path(figDir, "fig1")
+dir.create(fig1Dir)
+```
+
+```{r 1019 fig1a}
+fig1a <- stabreplor_plot
+```
+
+```{r 1019 fig1b}
+fig1b <- RvNR_vedo_hm
+```
+
+```{r 1019 fig1b}
+fig1c <- ggplot(RvNR_vedo_resp_time_df, aes(x = RvNR_beta, y = T2vT1_beta)) +
+  geom_hline(yintercept = 0, col = "grey") +
+  geom_vline(xintercept = 0, col = "grey") +
+  geom_point() +
+  xlim(-0.5,0.5) +
+  ylim(-0.5,0.5) +
+  labs(title = "Difference in % methylation",
+       subtitle = "Response-associated DMPs") +
+  xlab("R vs NR") +
+  ylab("T2 vs T1") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r 1019 fig1c}
+fig1d <- RvNR_vedo_gc_plot_tr
+```
+
+```{r 1019 fig1d}
+fig1e <- RvNR_vedo_sig_cpgs_gv_plot
+```
+
+```{r 1019 fig1}
+fig1ab <- plot_grid(fig1a, fig1b, labels = c("a", "b"), nrow = 1, ncol = 2, rel_widths = c(0.5, 1))
+fig1cde <- plot_grid(fig1c, fig1d, fig1e, labels = c("c", "d", "e"), nrow = 3, ncol = 1)
+
+fig1 <- plot_grid(fig1ab, fig1cde, nrow = 1, ncol = 2, rel_widths = c(1, 0.3))
+
+Cairo(width = 4000, height = 3000, type = "pdf", file = file.path(fig1Dir, "fig1.pdf"), bg = "white", units = "px", dpi = 120)
+print(fig1)
+dev.off()
+```
+
+### Fig 2
+
+```{r 1019 fig2 setup}
+fig2Dir <- file.path(figDir, "fig2")
+dir.create(fig2Dir)
+```
+
+```{r 1019 fig2a}
+# fig2atop <- dmr_plot(dmr_gr = range(gmset_vedo_anno_gr[grep("HLA-C", gmset_vedo_anno_gr$UCSC_RefGene_Name)], ignore.strand = T), 
+#                      meth_data = getBeta(gmset_vedo_filtered_t1t2), 
+#                      anno_gr = gmset_vedo_anno_gr, 
+#                      meth_groups = pData(gmset_vedo_filtered_t1t2)$Response, 
+#                      title = "HLA-C") + 
+#   ylab("% Methylation") +
+#   theme(legend.pos = "none")
+
+fig2atop <- dmr_effect_plot(region_of_interest = medstablor_df_gene_mdmp_gr[1,], tophits = RvNR_vedo_top_gr, significance = F, smooth = F, ylim = c(-0.5, 0.5))
+
+fig2abot_df <- medstablor_df[grep("HLA-C", medstablor_df$UCSC_RefGene_Name),]
+fig2abot_df <- fig2abot_df[order(fig2abot_df$start),]
+
+fig2abot1 <- cpg_strip_plot(cpg_num = rownames(fig2abot_df)[1], betas = getBeta(gmset_vedo_filtered_t1t2), factor_interest = pData(gmset_vedo_filtered_t1t2)$Response, type = "SE") + 
+  labs(title = rownames(fig2abot_df)[1],
+       subtitle = paste0(fig2abot_df$seqnames[1], ":", fig2abot_df$start[1])) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())
+fig2abot2 <- cpg_strip_plot(cpg_num = rownames(fig2abot_df)[2], betas = getBeta(gmset_vedo_filtered_t1t2), factor_interest = pData(gmset_vedo_filtered_t1t2)$Response, type = "SE") + 
+  labs(title = rownames(fig2abot_df)[2],
+       subtitle = paste0(fig2abot_df$seqnames[2], ":", fig2abot_df$start[2])) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())
+fig2abot3 <- cpg_strip_plot(cpg_num = rownames(fig2abot_df)[3], betas = getBeta(gmset_vedo_filtered_t1t2), factor_interest = pData(gmset_vedo_filtered_t1t2)$Response, type = "SE") + 
+  labs(title = rownames(fig2abot_df)[3],
+       subtitle = paste0(fig2abot_df$seqnames[3], ":", fig2abot_df$start[3])) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())
+```
+
+```{r 1019 fig2b}
+# fig2btop <- dmr_plot(dmr_gr = range(gmset_vedo_anno_gr[grep("FAM163A", gmset_vedo_anno_gr$UCSC_RefGene_Name)], ignore.strand = T), 
+#                      meth_data = getBeta(gmset_vedo_filtered_t1t2), 
+#                      anno_gr = gmset_vedo_anno_gr, 
+#                      meth_groups = pData(gmset_vedo_filtered_t1t2)$Response, 
+#                      title = "FAM163A") + 
+#   ylab("% Methylation") +
+#   theme(legend.pos = "none")
+
+fig2btop <- dmr_effect_plot(region_of_interest = medstablor_df_gene_mdmp_gr[2,], tophits = RvNR_vedo_top_gr, significance = F, smooth = F)
+
+fig2bbot_df <- medstablor_df[grep("FAM163A", medstablor_df$UCSC_RefGene_Name),]
+fig2bbot_df <- fig2bbot_df[order(fig2bbot_df$start),]
+
+fig2bbot1 <- cpg_strip_plot(cpg_num = rownames(fig2bbot_df)[1], betas = getBeta(gmset_vedo_filtered_t1t2), factor_interest = pData(gmset_vedo_filtered_t1t2)$Response, type = "SE") + 
+  labs(title = rownames(fig2bbot_df)[1],
+       subtitle = paste0(fig2bbot_df$seqnames[1], ":", fig2bbot_df$start[1])) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())
+
+fig2bbot2 <- cpg_strip_plot(cpg_num = rownames(fig2bbot_df)[2], betas = getBeta(gmset_vedo_filtered_t1t2), factor_interest = pData(gmset_vedo_filtered_t1t2)$Response, type = "SE") + 
+  labs(title = rownames(fig2bbot_df)[2],
+       subtitle = paste0(fig2bbot_df$seqnames[2], ":", fig2bbot_df$start[2])) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())
+```
+
+```{r 1019 fig2c}
+fig2c <- dmr_plot(dmr_gr = RvNR_dmr_vedo_gr[1], 
+                  meth_data = getBeta(gmset_vedo_filtered_t1t2), 
+                  anno_gr = gmset_vedo_anno_gr, 
+                  meth_groups = pData(gmset_vedo_filtered_t1t2)$Response, 
+                  highlight = c(start(RvNR_dmr_vedo_gr[1]), end(RvNR_dmr_vedo_gr[1]))) + 
+  ylab("% Methylation")
+```
+
+```{r 1019 fig2}
+Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(fig2Dir, "fig2atop.pdf"), bg = "white", units = "px", dpi = 120)
+print(fig2atop)
+dev.off()
+
+Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(fig2Dir, "fig2btop.pdf"), bg = "white", units = "px", dpi = 120)
+print(fig2btop)
+dev.off()
+
+fig2abbot <- ggarrange(fig2abot1, fig2abot2, fig2abot3, fig2bbot1, fig2bbot2, nrow = 1, ncol = 5, common.legend = T, legend.pos = "bottom") 
+
+Cairo(width = 2000, height = 750, type = "pdf", file = file.path(fig2Dir, "fig2abbot.pdf"), bg = "white", units = "px", dpi = 120)
+print(fig2abbot$`1`)
+dev.off()
+
+Cairo(width = 2000, height = 750, type = "pdf", file = file.path(fig2Dir, "fig2c.pdf"), bg = "white", units = "px", dpi = 120)
+print(fig2c)
+dev.off()
+```
+
+### Fig 3
+
+```{r 1019 fig3 setup}
+fig3Dir <- file.path(figDir, "fig3")
+dir.create(fig3Dir)
+```
+
+```{r 1019 fig3a}
+fig3a <- overlap_pilot_pilotsig_plot
+```
+
+```{r 1019 fig3b}
+fig3b <- overlap_pilot_discoverysig_plot
+```
+
+```{r 1019 fig3c}
+fig3c <- mval_vedo_pilotsig_discovery_svd_plot
+```
+
+```{r 1019 fig3d}
+fig3d <- mval_vedo_discoverysig_pilot_svd_plot
+```
+
+```{r 1019 fig3e}
+fig3e <- mval_vedo_pilotsig_discovery_ol_svd_plot
+```
+
+```{r 1019 fig3}
+fig3ab <- ggarrange(fig3a + theme(legend.pos = "bottom"), fig3b + theme(legend.pos = "bottom"), nrow = 1, ncol = 2, labels = c("a", "b"))
+fig3cd <- ggarrange(fig3c, fig3d, nrow = 1, ncol = 2, common.legend = T, legend = "bottom", labels = c("c", "d"))
+fig3e <- ggarrange(fig3e + theme(legend.pos = "none"), nrow = 1, ncol = 2, labels = c("e", ""))
+
+fig3 <- ggarrange(fig3ab, fig3cd, fig3e, nrow = 3, ncol = 1)
+
+Cairo(width = 2000, height = 3000, type = "pdf", file = file.path(fig3Dir, "fig3.pdf"), bg = "white", units = "px", dpi = 120)
+print(fig3)
+dev.off()
+```
+
+### Fig S1
+
+```{r 1019 figS1 setup}
+figS1Dir <- file.path(figDir, "figS1")
+dir.create(figS1Dir)
+```
+
+```{r 1019 figS1}
+betas_vedo_t1t2_respdmps <- getBeta(gmset_vedo_filtered_t1t2)[rownames(medstablor_df),]
+betas_vedo_t1t2_respdmps_melt <- melt(betas_vedo_t1t2_respdmps, varnames = c("CpG_ID", "SXS_POS"), value.name = "Beta")
+betas_vedo_t1t2_respdmps_melt <- cbind(betas_vedo_t1t2_respdmps_melt, pData(gmset_vedo_filtered_t1t2)[betas_vedo_t1t2_respdmps_melt$SXS_POS, c("Timepoint", "Response", "Biobank_ID")])
+
+figS1 <- ggplot(data.frame(betas_vedo_t1t2_respdmps_melt), aes(x = Timepoint, y = Beta, col = Response)) +
+  geom_point(aes(group = Biobank_ID), alpha = 0.25, show.legend = F) +
+  geom_line(aes(group = Biobank_ID, alpha = 0.25), linetype = "dotted", show.legend = F) +
+  geom_smooth(method = "lm", aes(group = Response), se = F) +
+  facet_wrap(~CpG_ID, nrow = 10, ncol = 4) +
+  ylab("Difference % methylation") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+Cairo(width = 2000, height = 2500, type = "pdf", file = file.path(figS1Dir, "figS1.pdf"), bg = "white", units = "px", dpi = 120)
+print(figS1)
+dev.off()
+```
+
+### Fig S2
+
+```{r 1019 figS2 setup}
+figS2Dir <- file.path(figDir, "figS2")
+dir.create(figS2Dir)
+```
+
+```{r 1019 figS2}
+figS2 <- ggplot(data.frame(betas_vedo_t1t2t3_respdmps_melt), aes(x = Timepoint, y = Beta, col = Response)) +
+  geom_point(aes(group = Biobank_ID), alpha = 0.25, show.legend = F) +
+  geom_line(aes(group = Biobank_ID, alpha = 0.25), linetype = "dotted", show.legend = F) +
+  geom_smooth(method = "lm", aes(group = Response), se = F) +
+  facet_wrap(~CpG_ID, nrow = 10, ncol = 4) +
+  ylab("Difference % methylation") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+Cairo(width = 2000, height = 2500, type = "pdf", file = file.path(figS2Dir, "figS2.pdf"), bg = "white", units = "px", dpi = 120)
+print(figS2)
+dev.off()
+```
+
+### Fig S3
+
+```{r 1019 figS3 setup}
+figS3Dir <- file.path(figDir, "figS3")
+dir.create(figS3Dir)
+```
+
+```{r 1019 figS3a}
+figS3a <- mval_vedo_pilotsig_pilot_svd_plot
+```
+
+```{r 1019 figS3b}
+figS3b <- mval_vedo_discoverysig_discovery_svd_plot
+```
+
+```{r 1019 figS3}
+figS3 <- ggarrange(figS3a, figS3b, nrow = 1, ncol = 2, label = c("a", "b"), legend = "bottom", common.legend = T)
+
+Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(figS3Dir, "figS3.pdf"), bg = "white", units = "px", dpi = 120)
+print(figS3$`1`)
+dev.off()
+```
+
+### Visualization predictor genes
+
+```{r visualization predictor CpGs}
+cpg_strat_plot <- function(cpg, betas, facet_factor, x_factor, title, subtitle){
+  beta_melt <- reshape2::melt(betas[cpg,])
+  beta_df <- cbind(beta_melt, 
+                   facet_factor, 
+                   x_factor)
+  
+  ggplot(data = beta_df, aes(x = x_factor, y = value)) +
+    stat_summary(fun.data = mean_se, geom = "crossbar", alpha = 0.5) +
+    geom_jitter() +
+    theme_bw() +
+    facet_wrap(~facet_factor) +
+    xlab("") +
+    labs(title = title, subtitle = subtitle) +
+    ylab("% Methylation") +
+    ylim(0,1) +
+    scale_shape_manual(values=(1:nlevels(beta_df$Cohort))%%10) +
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 14, face = "bold"),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size = 14, face = "bold"),
+          legend.text = element_text(size = 12),
+          plot.title = element_text(face = "bold"),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          strip.text.x = element_text(size = 14))
+}
+
+visDir <- file.path(figDir, "predictor CpGs")
+dir.create(visDir)
+
+pdfvisDir <- file.path(visDir, "pdf")
+dir.create(pdfvisDir)
+
+pngvisDir <- file.path(visDir, "png")
+dir.create(pngvisDir)
+
+for(i in 1:nrow(medstablor_df)){
+  Cairo(width = 500, height = 500, type = "png", file = file.path(pngvisDir, paste0(medstablor_df[i,]$Name, "_vedo.png")) , bg = "white", units = "px", dpi = 120)
+  print(cpg_strat_plot(cpg = medstablor_df[i,]$Name, betas = getBeta(gmset_vedo_filtered), facet_factor = pData(gmset_vedo_filtered)$Response, x_factor = paste0("T", pData(gmset_vedo_filtered)$Timepoint), title = paste0("Vedo: ", medstablor_df[i,]$Name), subtitle = paste0(medstablor_df[i,]$seqnames, ":", medstablor_df[i,]$start)))
+  dev.off()
+  
+  Cairo(width = 1000, height = 750, type = "pdf", file = file.path(pdfvisDir, paste0(medstablor_df[i,]$Name, "_vedo.pdf")) , bg = "white", units = "px", dpi = 120)
+  print(cpg_strat_plot(cpg = medstablor_df[i,]$Name, betas = getBeta(gmset_vedo_filtered), facet_factor = pData(gmset_vedo_filtered)$Response, x_factor = paste0("T", pData(gmset_vedo_filtered)$Timepoint), title = paste0("Vedo: ", medstablor_df[i,]$Name), subtitle = paste0(medstablor_df[i,]$seqnames, ":", medstablor_df[i,]$start)))
+  dev.off()
+}
+
+```
+
+## Abstract ECCO 2020
+
+```{r}
+eccoDir <- file.path("docs", "ecco")
+dir.create(eccoDir)
+
+eccofigDir <- file.path("docs", "ecco", "figures")
+dir.create(eccofigDir)
+```
+
+
+```{r}
+replor_df_abs <- replor_df
+rownames(replor_df_abs) <- c("(Intercept)", paste0("CpG", 1:(nrow(replor_df_abs)-1)))
+replor_df_abs_med <- rowMedians(as.matrix(replor_df_abs))
+names(replor_df_abs_med) <- rownames(replor_df_abs)
+replor_df_abs_med <- replor_df_abs_med[replor_df_abs_med != 0]
+
+replor_melt_abs <- melt(cbind(feature = rownames(replor_df_abs), replor_df_abs))
+replor_melt_abs <- replor_melt_abs[replor_melt_abs$feature != "(Intercept)",]
+replor_melt_abs$Stability <- "Unstable"
+replor_melt_abs$Stability[replor_melt_abs$feature %in% names(replor_df_abs_med)] <- "Stable"
+replor_melt_abs <- replor_melt_abs[replor_melt_abs$Stability == "Stable",]
+replor_melt_abs$feature <- factor(replor_melt_abs$feature, levels = names(sort(replor_df_abs_med[-1])))
+replor_melt_abs$Direction <- "Positive"
+replor_melt_abs$Direction[replor_melt_abs$feature %in% names(replor_df_abs_med[-1])[which(replor_df_abs_med[-1]<0)]] <- "Negative"
+
+fig_abs_l <- ggplot(replor_melt_abs, aes(x = feature, y = value, col = Direction)) +
+  geom_jitter(alpha = 0.10) +
+  geom_boxplot(alpha = 0.50) +
+  theme_bw() +
+  ylab("log(OR)") +
+  labs(title = "100 repetitions of 10-fold cross-validations",
+       subtitle = "Median-stabilized") +
+  theme(axis.title.y = element_blank()) +
+  coord_flip()
+
+fig_abs_r <- plot_pilot_roc
+
+fig_abs <- ggarrange(fig_abs_l, fig_abs_r, nrow = 1, ncol = 2)
+
+Cairo(width = 2200, height = 1100, type = "pdf", file = file.path(eccofigDir, "fig_abstract.pdf"), bg = "white", units = "px", dpi = 120)
+fig_abs
+dev.off()
+```
+
+# Save the data
+
+```{r raw data}
+require(data.table)
+
+rgset_raw <- mapToGenome(preprocessRaw(rgset_vedo))
+
+write.csv2(minfi::getAnnotation(rgset_raw), file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_annotation.csv"))
+write.csv2(minfi::getBeta(rgset_raw), file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_semi_raw.csv"))
+
+rgset_raw_nosex <- rgset_raw[-which(minfi::getAnnotation(rgset_raw)$chr %in% c("chrX", "chrY")),]
+rgset_raw_nosex_noprom <- rgset_raw_nosex[!names(rgset_raw_nosex) %in% pmprobes,]
+write.csv2(minfi::getBeta(rgset_raw_nosex_noprom), file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_semi_raw_filtered.csv"))
+
+excluded_probes <- rbind(data.frame(minfi::getAnnotation(rgset_raw)[which(minfi::getAnnotation(rgset_raw)$chr %in% c("chrX", "chrY")), c("chr", "pos", "Name")], excluded = "Allosomal"),
+                         data.frame(minfi::getAnnotation(rgset_raw)[rownames(rgset_raw) %in% pmprobes, c("chr", "pos", "Name")], excluded = "Promiscuous"))
+
+write.csv(excluded_probes, file.path(outputDir, "processed_data", "excluded_probes.csv"))
+```
+
+```{r raw data t1}
+rgset_raw_nosex_noprom_t1 <- rgset_raw_nosex_noprom[,pData(rgset_raw_nosex_noprom)$Timepoint == 1]
+beta_vedo_raw_filtered_t1 <- data.frame(Response = pData(rgset_raw_nosex_noprom_t1)[,c("Response")],
+                                        t(minfi::getBeta(rgset_raw_nosex_noprom_t1)),
+                                        row.names = pData(rgset_raw_nosex_noprom_t1)$Biobank_ID)
+
+fwrite(beta_vedo_raw_filtered_t1, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_semi_raw_filtered_t1_prepared.csv"))
+```
+
+```{r raw data t2}
+rgset_raw_nosex_noprom_t2 <- rgset_raw_nosex_noprom[,pData(rgset_raw_nosex_noprom)$Timepoint == 2]
+beta_vedo_raw_filtered_t2 <- data.frame(Response = pData(rgset_raw_nosex_noprom_t2)$Response,
+                                        t(minfi::getBeta(rgset_raw_nosex_noprom_t2)),
+                                        row.names = pData(rgset_raw_nosex_noprom_t2)$Biobank_ID)
+
+fwrite(beta_vedo_raw_filtered_t2, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_semi_raw_filtered_t2_prepared.csv"))
+```
+
+```{r raw data across t1 and t2}
+beta_vedo_raw_filtered_dt1t2 <- minfi::getBeta(rgset_raw_nosex_noprom_t2)-minfi::getBeta(rgset_raw_nosex_noprom_t1)
+beta_vedo_raw_filtered_dt1t2_anno <- data.frame(Response = pData(rgset_raw_nosex_noprom_t2)$Response,
+                                                t(beta_vedo_raw_filtered_dt1t2),
+                                                row.names = pData(rgset_raw_nosex_noprom_t2)$Biobank_ID)
+
+fwrite(beta_vedo_raw_filtered_dt1t2_anno, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_semi_raw_filtered_dt1t2_prepared.csv"))
+```
+
+```{r background corrected and normalized data t1}
+gmset_vedo_filtered_t1 <- gmset_vedo_filtered[,pData(gmset_vedo_filtered)$Timepoint == 1]
+
+snp_cpgs <- getSnpInfo(gmset_vedo_filtered_t1)
+cpgs_keep <- rownames(snp_cpgs)[-which(snp_cpgs$Probe_maf>0.01 | snp_cpgs$CpG_maf>0.01 | snp_cpgs$SBE_maf>0.01)]
+
+gmset_vedo_filtered_t1 <- gmset_vedo_filtered_t1[cpgs_keep,]
+
+cpg_annotation_filtered_t1 <- paste0(rownames(gmset_vedo_filtered_t1), "_", unlist(lapply(lapply(strsplit(getAnnotation(gmset_vedo_filtered_t1)$UCSC_RefGene_Name, ";"), unique), function(genes){paste(genes, collapse = "_")})))
+cpg_annotation_filtered_t1 <- gsub("(^.+)_$", "\\1", cpg_annotation_filtered_t1)
+
+beta_vedo_filtered_t1 <- data.frame(Response = pData(gmset_vedo_filtered_t1)[,c("Response")],
+                                    t(minfi::getBeta(gmset_vedo_filtered_t1)),
+                                    row.names = pData(gmset_vedo_filtered_t1)$Biobank_ID)
+colnames(beta_vedo_filtered_t1)[2:ncol(beta_vedo_filtered_t1)] <- cpg_annotation_filtered_t1
+
+fwrite(beta_vedo_filtered_t1, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_funnorm_filtered_nosnp_t1_prepared.csv"))
+
+fwrite(beta_vedo_filtered_t1, "/home/ayliyim/surfdrive/Shared/191211/PRJ0000008_CDMEDRESP_vedolizumab_funnorm_filtered_nosnp_t1_prepared.csv")
+```
+
+```{r background corrected and normalized data t2}
+gmset_vedo_filtered_t2 <- gmset_vedo_filtered[,pData(gmset_vedo_filtered)$Timepoint == 2]
+beta_vedo_filtered_t2 <- data.frame(Response = pData(gmset_vedo_filtered_t2)[,c("Response")],
+                                    t(minfi::getBeta(gmset_vedo_filtered_t2)),
+                                    row.names = pData(gmset_vedo_filtered_t2)$Biobank_ID)
+
+fwrite(beta_vedo_filtered_t2, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_funnorm_filtered_t2_prepared.csv"))
+```
+
+```{r background corrected and normalized data across t1 and t2}
+beta_vedo_filtered_dt1t2 <- minfi::getBeta(gmset_vedo_filtered_t2)-minfi::getBeta(gmset_vedo_filtered_t1)
+
+beta_vedo_filtered_dt1t2_anno <- data.frame(Response = pData(gmset_vedo_filtered_t2)[,c("Response")], 
+                                            t(beta_vedo_filtered_dt1t2),
+                                            row.names = pData(gmset_vedo_filtered_t2)$Biobank_ID)
+colnames(beta_vedo_filtered_dt1t2_anno)[2:ncol(beta_vedo_filtered_dt1t2_anno)] <- cpg_annotation_filtered_t1
+
+fwrite(beta_vedo_filtered_dt1t2_anno, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_funnorm_filtered_dt2t1_prepared.csv"))
+```
+
+### Background correction only
+
+```{r background corrected}
+cpg_annotation_vedo <- paste0(rownames(gmset_noob_vedo), "_", unlist(lapply(lapply(strsplit(getAnnotation(gmset_noob_vedo)$UCSC_RefGene_Name, ";"), unique), function(genes){paste(genes, collapse = "_")})))
+cpg_annotation_vedo <- gsub("(^.+)_$", "\\1", cpg_annotation_vedo)
+
+beta_vedo_noob <- data.frame(Response = pData(gmset_noob_vedo)[,c("Response")],
+                             t(minfi::getBeta(gmset_noob_vedo)),
+                             row.names = paste0(pData(gmset_noob_vedo)$Biobank_ID, "_", pData(gmset_noob_vedo)$Timepoint))
+colnames(beta_vedo_noob)[2:ncol(beta_vedo_noob)] <- cpg_annotation_vedo
+
+beta_vedo_noob_t1 <- beta_vedo_noob[grep("_1", rownames(beta_vedo_noob)),]
+beta_vedo_noob_t2 <- beta_vedo_noob[grep("_2", rownames(beta_vedo_noob)),]
+beta_vedo_noob_t3 <- beta_vedo_noob[grep("_3", rownames(beta_vedo_noob)),]
+
+data.table::fwrite(beta_vedo_noob_t1, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_t1.csv"))
+data.table::fwrite(beta_vedo_noob_t2, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_t2.csv"))
+data.table::fwrite(beta_vedo_noob_t3, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_t3.csv"))
+```
+
+```{r background corrected without snps}
+cpg_annotation_vedo_nosnp <- paste0(rownames(gmset_noob_vedo_nosnp), "_", unlist(lapply(lapply(strsplit(getAnnotation(gmset_noob_vedo_nosnp)$UCSC_RefGene_Name, ";"), unique), function(genes){paste(genes, collapse = "_")})))
+cpg_annotation_vedo_nosnp <- gsub("(^.+)_$", "\\1", cpg_annotation_vedo_nosnp)
+
+beta_vedo_noob_nosnp <- data.frame(Response = pData(gmset_noob_vedo_nosnp)[,c("Response")],
+                                   t(minfi::getBeta(gmset_noob_vedo_nosnp)),
+                                   row.names = paste0(pData(gmset_noob_vedo_nosnp)$Biobank_ID, "_", pData(gmset_noob_vedo_nosnp)$Timepoint))
+colnames(beta_vedo_noob_nosnp)[2:ncol(beta_vedo_noob_nosnp)] <- cpg_annotation_vedo_nosnp
+
+beta_vedo_noob_nosnp_t1 <- beta_vedo_noob_nosnp[grep("_1", rownames(beta_vedo_noob_nosnp)),]
+beta_vedo_noob_nosnp_t2 <- beta_vedo_noob_nosnp[grep("_2", rownames(beta_vedo_noob_nosnp)),]
+beta_vedo_noob_nosnp_t3 <- beta_vedo_noob_nosnp[grep("_3", rownames(beta_vedo_noob_nosnp)),]
+
+data.table::fwrite(beta_vedo_noob_nosnp_t1, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_nosnp_t1.csv"))
+data.table::fwrite(beta_vedo_noob_nosnp_t2, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_nosnp_t2.csv"))
+data.table::fwrite(beta_vedo_noob_nosnp_t3, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_nosnp_t3.csv"))
+```
+
+```{r background corrected without snps without gaps}
+cpg_annotation_vedo_nosnp_nogap <- paste0(rownames(gmset_noob_vedo_nosnp_nogap), "_", unlist(lapply(lapply(strsplit(getAnnotation(gmset_noob_vedo_nosnp_nogap)$UCSC_RefGene_Name, ";"), unique), function(genes){paste(genes, collapse = "_")})))
+cpg_annotation_vedo_nosnp_nogap <- gsub("(^.+)_$", "\\1", cpg_annotation_vedo_nosnp_nogap)
+
+beta_vedo_noob_nosnp_nogap <- data.frame(Response = pData(gmset_noob_vedo_nosnp_nogap)[,c("Response")],
+                                         t(minfi::getBeta(gmset_noob_vedo_nosnp_nogap)),
+                                         row.names = paste0(pData(gmset_noob_vedo_nosnp_nogap)$Biobank_ID, "_", pData(gmset_noob_vedo_nosnp_nogap)$Timepoint))
+colnames(beta_vedo_noob_nosnp_nogap)[2:ncol(beta_vedo_noob_nosnp_nogap)] <- cpg_annotation_vedo_nosnp_nogap
+
+beta_vedo_noob_nosnp_nogap_t1 <- beta_vedo_noob_nosnp_nogap[grep("_1", rownames(beta_vedo_noob_nosnp_nogap)),]
+beta_vedo_noob_nosnp_nogap_t2 <- beta_vedo_noob_nosnp_nogap[grep("_2", rownames(beta_vedo_noob_nosnp_nogap)),]
+beta_vedo_noob_nosnp_nogap_t3 <- beta_vedo_noob_nosnp_nogap[grep("_3", rownames(beta_vedo_noob_nosnp_nogap)),]
+
+data.table::fwrite(beta_vedo_noob_nosnp_nogap_t1, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_nosnp_nogap_t1.csv"))
+data.table::fwrite(beta_vedo_noob_nosnp_nogap_t2, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_nosnp_nogap_t2.csv"))
+data.table::fwrite(beta_vedo_noob_nosnp_nogap_t3, file.path(outputDir, "processed_data", "PRJ0000008_CDMEDRESP_vedolizumab_noob_nosnp_nogap_t3.csv"))
+```
+
+
+```{r save vedo gmset}
+saveRDS(gmset_vedo_filtered, file.path(rdsDir, "gmset_vedo_filtered.Rds"))
+```
+
+# T1 T2 T3 R v NR
+
+```{r}
+gmset_vedo_filtered_t1t2t3
+
+table(pData(gmset_vedo_filtered_t1t2t3)$Biobank_ID)
+```
+
+```{r vedo DM analyses preparation}
+design_rvnr_t1t2t3 <- model.matrix(~0 + resptime + Sex + Age_baseline + Smoker, data = pData(gmset_vedo_filtered_t1t2t3))
+colnames(design_rvnr_t1t2t3) <- c("T1_NR", "T2_NR", "T3_NR", "T1_R", "T2_R", "T3_R", "Male", "Age", "Smoker")
+
+mvals_lmfit_vedo_t1t2t3 <- lmFit(getM(gmset_vedo_filtered_t1t2t3), design = design_rvnr_t1t2t3)
+betas_lmfit_vedo_t1t2t3 <- lmFit(getBeta(gmset_vedo_filtered_t1t2t3), design = design_rvnr_t1t2t3)
+
+contrast_mat_vedot1t2t3 <- makeContrasts(
+  RvNRT1 = T1_R-T1_NR,
+  RvNRT2 = T2_R-T2_NR,
+  RvNRT3 = T3_R-T3_NR,
+  levels = design_rvnr_t1t2t3
+)
+
+mvals_contrastfit_vedo_t1t2t3 <- contrasts.fit(mvals_lmfit_vedo_t1t2t3, contrast_mat_vedot1t2t3)
+mvals_ebayes_vedo_t1t2t3 <- eBayes(mvals_contrastfit_vedo_t1t2t3)
+
+betas_contrastfit_vedo_t1t2t3 <- contrasts.fit(betas_lmfit_vedo_t1t2t3, contrast_mat_vedot1t2t3)
+betas_ebayes_vedo_t1t2t3 <- eBayes(betas_contrastfit_vedo_t1t2t3)
+```
+
+## T1_RvNR
+
+```{r vedo DM analyses RvNR for T1 subsets}
+RvNR_T1_vedot1t2t3_top <- topTable(mvals_ebayes_vedo_t1t2t3, coef = "RvNRT1", number = "Inf", adjust.method = "BH")
+RvNR_T1_vedot1t2t3_top <- cbind(RvNR_T1_vedot1t2t3_top, Beta = coefficients(betas_ebayes_vedo_t1t2t3)[rownames(T2vT1R_vedo_top), "RvNRT1"], data.frame(gmset_vedo_anno_gr[rownames(RvNR_T1_vedot1t2t3_top), ]))
+```
+
+```{r vedo DM analyses RvNR for T2 subsets}
+RvNR_T2_vedot1t2t3_top <- topTable(mvals_ebayes_vedo_t1t2t3, coef = "RvNRT2", number = "Inf", adjust.method = "BH")
+RvNR_T2_vedot1t2t3_top <- cbind(RvNR_T2_vedot1t2t3_top, Beta = coefficients(betas_ebayes_vedo_t1t2t3)[rownames(T2vT1R_vedo_top), "RvNRT2"], data.frame(gmset_vedo_anno_gr[rownames(RvNR_T2_vedot1t2t3_top), ]))
+```
+
+```{r vedo DM analyses RvNR for T3 subsets}
+RvNR_T3_vedot1t2t3_top <- topTable(mvals_ebayes_vedo_t1t2t3, coef = "RvNRT3", number = "Inf", adjust.method = "BH")
+RvNR_T3_vedot1t2t3_top <- cbind(RvNR_T3_vedot1t2t3_top, Beta = coefficients(betas_ebayes_vedo_t1t2t3)[rownames(T2vT1R_vedo_top), "RvNRT3"], data.frame(gmset_vedo_anno_gr[rownames(RvNR_T3_vedot1t2t3_top), ]))
+```
+
+

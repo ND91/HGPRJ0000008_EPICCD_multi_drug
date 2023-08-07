@@ -1,0 +1,185 @@
+---
+title: "Prediction stats"
+author: "Andrew Y.F. Li Yim"
+date: "11/11/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+require(dplyr)
+require(plotROC)
+require(pROC)
+require(foreach)
+require(ggplot2)
+require(Cairo)
+```
+
+```{r functions}
+predstats <- function(predicted, actual){
+  confusion_matrix <- data.frame(table(predicted = predicted, actual = actual))
+  
+  prediction_stats <- data.frame(TP = confusion_matrix$Freq[4],
+                                 TN = confusion_matrix$Freq[1],
+                                 FP = confusion_matrix$Freq[2],
+                                 FN = confusion_matrix$Freq[3]) %>%
+    dplyr::mutate(Precision = TP/(TP+FP),
+                  Recall = TP/(TP+FN),
+                  Accuracy = (TP+TN)/(TP+FP+FN+TN),
+                  PPV = TP/(TP+FP),
+                  NPV = TN/(TN+FN),
+                  F1score = 2*(Recall*Precision)/(Recall+Precision))
+  
+  return(prediction_stats)
+}
+```
+
+
+## RvNR
+
+```{r rvnr setup}
+rvnr_samplesDir <- file.path("data","samples", "02_validation")
+rvnr_samples <- readxl::read_excel(file.path(samplesDir, "210906_samples_vedolizumab_aumc_validation1_PRJ0000008_CDMEDRESP.xlsx"))
+rvnr_samples_T1 <- rvnr_samples %>%
+  dplyr::filter(Timepoint == "T1") %>%
+  dplyr::select(Biobank_ID, Response)
+```
+
+```{r rvnr predictions}
+rvnr_probabilities <- readxl::read_excel(file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "output", "probabilities.xlsx")) %>%
+  dplyr::left_join(rvnr_samples_T1, by = c("SampleID" = "Biobank_ID")) %>%
+  data.frame()
+```
+
+```{r rvnr roc}
+rvnr_roc <- foreach(i = 2:(ncol(rvnr_probabilities)-1), .combine = "c") %do%
+    roc(rvnr_probabilities$Response, rvnr_probabilities[,i])$auc
+
+rvnr_roc <- data.frame(SampleID = colnames(rvnr_probabilities)[2:(ncol(rvnr_probabilities)-1)],
+                       AUC = rvnr_roc)
+
+Cairo(width = 2500, height = 1500, type = "pdf", file = file.path("responders_ROC.pdf"), bg = "white", units = "px", dpi = 120)
+rvnr_probabilities %>%
+  tidyr::pivot_longer(!c(SampleID, Response), names_to = "Model", values_to = "Probabilities") %>%
+  dplyr::left_join(rvnr_roc, by = c("Model" = "SampleID")) %>%
+  dplyr::mutate(Model = gsub("ishtu", "Ishtu", Model),
+                Model = gsub("snp", " SNP", Model),
+                Model = paste0(gsub("^(.+)_(.+)_(.+)_(.+)$", "\\1 \\2\n\\3\n\\4", Model), "\nAUC = ", round(AUC, 3))) %>%
+  ggplot(aes(m = Probabilities, d = Response)) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  theme_bw() +
+  facet_wrap(~Model, nrow = 2, ncol = 4) +
+  labs(title = "Response",
+       y = "TPR",
+       x = "FPR")
+dev.off()
+```
+
+```{r rvnr responses}
+rvnr_responses <- readxl::read_excel(file.path("output", "DM_analyses", "03_biological_validation", "aumc1", "211005", "horaizon", "output", "responses.xlsx")) %>%
+  dplyr::left_join(rvnr_samples_T1, by = c("SampleID" = "Biobank_ID")) %>%
+  data.frame()
+```
+
+```{r rvnr stats}
+rvnr_stats <- foreach(i = 2:(ncol(rvnr_responses)-1), .combine = "rbind") %do%
+    predstats(predicted = rvnr_responses[,i], actual = rvnr_responses$Response)
+
+rownames(rvnr_stats) <- colnames(rvnr_responses)[2:(ncol(rvnr_responses)-1)]
+
+write.csv(rvnr_stats, "responders_stats.csv")
+```
+
+## Super RvNR
+
+```{r srvnr setup}
+srvnr_samplesDir <- file.path("output","DM_analyses", "04_super_response", "data")
+srvnr_samples <- readxl::read_excel(file.path(srvnr_samplesDir, "211013_SNR_metadata.xlsx")) %>%
+  dplyr::filter(`EPIC VEDO Cohort` == "validation") %>%
+  dplyr::rename(SampleID = `biobank code`,
+                Cohort = `EPIC VEDO Cohort`) %>%
+  dplyr::select(-Cohort)
+```
+
+```{r srvnr predictions}
+srvnr_probabilities <- readxl::read_excel(file.path("output","DM_analyses", "04_super_response", "output", "horaizon", "211111", "probabilities.xlsx")) %>%
+  dplyr::left_join(srvnr_samples, by = c("SampleID")) %>%
+  data.frame()
+```
+
+```{r srvnr roc}
+srvnr_roc <- foreach(i = 2:(ncol(srvnr_probabilities)-1), .combine = "c") %do%
+    roc(srvnr_probabilities$Response, srvnr_probabilities[,i])$auc
+
+srvnr_roc <- data.frame(SampleID = colnames(srvnr_probabilities)[2:(ncol(srvnr_probabilities)-1)],
+                       AUC = srvnr_roc)
+
+Cairo(width = 2500, height = 800, type = "pdf", file = file.path("super_responders_ROC.pdf"), bg = "white", units = "px", dpi = 120)
+srvnr_probabilities %>%
+  tidyr::pivot_longer(!c(SampleID, Response), names_to = "Model", values_to = "Probabilities") %>%
+  dplyr::left_join(srvnr_roc, by = c("Model" = "SampleID")) %>%
+  dplyr::mutate(Model = gsub("ishtu", "Ishtu", Model),
+                Model = gsub("snp", " SNP", Model),
+                Model = paste0(gsub("^(.+)_(.+)_(.+)_(.+)$", "\\1 \\2\n\\3\n\\4", Model), "\nAUC = ", round(AUC, 3))) %>%
+  ggplot(aes(m = Probabilities, d = Response)) +
+  geom_abline(intercept = 0, col = "grey", linetype = "dashed") +
+  geom_roc(labels = FALSE, n.cuts = 0) +
+  theme_bw() +
+  facet_wrap(~Model, nrow = 2, ncol = 4) +
+  labs(title = "Super Response",
+       y = "TPR",
+       x = "FPR")
+dev.off()
+```
+
+```{r srvnr responses}
+srvnr_responses <- readxl::read_excel(file.path("output","DM_analyses", "04_super_response", "output", "horaizon", "211111", "responses.xlsx")) %>%
+  dplyr::left_join(srvnr_samples, by = c("SampleID")) %>%
+  data.frame()
+
+srvnr_responses$normalized_together_loosesnp_complete <- ifelse(srvnr_responses$normalized_together_loosesnp_complete == "R", 1, 0)
+srvnr_responses$normalized_together_loosesnp_ishtu <- ifelse(srvnr_responses$normalized_together_loosesnp_ishtu == "R", 1, 0)
+srvnr_responses$normalized_together_strictsnp_complete <- ifelse(srvnr_responses$normalized_together_strictsnp_complete == "R", 1, 0)
+srvnr_responses$normalized_together_strictsnp_ishtu <- ifelse(srvnr_responses$normalized_together_strictsnp_ishtu == "R", 1, 0)
+srvnr_responses$Response <- ifelse(srvnr_responses$Response == "SR", 1, 0)
+```
+
+```{r srvnr stats}
+srvnr_stats <- foreach(i = 2:(ncol(srvnr_responses)-1), .combine = "rbind") %do%
+    predstats(predicted = srvnr_responses[,i], actual = srvnr_responses$Response)
+
+rownames(srvnr_stats) <- colnames(srvnr_responses)[2:(ncol(srvnr_responses)-1)]
+
+write.csv(srvnr_stats, "super_responders_stats.csv")
+```
+
+## Final markers
+
+```{r}
+predictor_cpgs <- readxl::read_excel(file.path("output", "DM_analyses", "220113_predictor_cpgs.xlsx")) %>%
+  dplyr::filter(Comparison == "independent discovery validation")
+```
+
+```{r}
+gmset_discval_T1 <- gmset_discval[,pData(gmset_discval)$Timepoint == "T1" & pData(gmset_discval)$Cohort != "Oxford"]
+betas_discval_combat_csp_T1 <- betas_discval_combat_csp[,colnames(gmset_discval_T1)]
+```
+
+```{r visualizations}
+for(i in 1:nrow(predictor_cpgs)){
+  #Cairo(width = 2400, height = 800, type = "pdf", file = file.path("output", "DM_analyses", "03_biological_validation", paste0(predictor_cpgs$CGID[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  Cairo(width = 500, height = 750, type = "png", file = file.path("output", "DM_analyses", "03_biological_validation", paste0(predictor_cpgs$CGID[i], ".png")), bg = "white", units = "px", dpi = 120)
+  print(transcriptStripPlot(id = predictor_cpgs$CGID[i], 
+                            counts = betas_discval_combat_csp_T1, 
+                            group = pData(gmset_discval_T1)$Response, 
+                            #strat = pData(gmset_discval_T1)$Cohort, 
+                            type = "boxplot") +
+          labs(title = predictor_cpgs$CGID[i],
+               subtitle = ifelse(!is.na(predictor_cpgs$UCSC_RefGene_Name[i]), predictor_cpgs$UCSC_RefGene_Name[i], NA)))
+  dev.off()
+}
+
+```
+

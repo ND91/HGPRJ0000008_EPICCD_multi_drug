@@ -1,0 +1,127 @@
+---
+title: "QC Methylation MiSeq"
+author: "Andrew Y.F. Li Yim"
+date: "6/21/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+require(bsseq)
+require(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+
+bsseqDir <- file.path("output", "DM_analyses", "02_technical_validation")
+dir.create(bsseqDir)
+```
+
+# TNXB
+
+```{r bsseq}
+tnxb_p1 <- read.bismark(files = file.path("data", "bsseq", "methylation", "TNXB_P1_S3_L001_R1_001_bismark_bt2_pe.bismark.cov.gz"),
+                      rmZeroCov = FALSE,
+                      strandCollapse = FALSE,
+                      verbose = TRUE)
+
+tnxb_p1_df <- data.frame(granges(tnxb_p1), 
+                         Coverage = as.vector(bsseq::getCoverage(tnxb_p1)),
+                         Methylation = as.vector(bsseq::getMeth(tnxb_p1, type = "raw")))
+
+tnxb_p1_df <- tnxb_p1_df[tnxb_p1_df$seqnames == 6,]
+
+tnxb_p3 <- read.bismark(files = file.path("data", "bsseq", "methylation", "TNXB_P3_S5_L001_R1_001_bismark_bt2_pe.bismark.cov.gz"),
+                        rmZeroCov = FALSE,
+                        strandCollapse = FALSE,
+                        verbose = TRUE)
+
+tnxb_p3_df <- data.frame(granges(tnxb_p3), 
+                         Coverage = as.vector(bsseq::getCoverage(tnxb_p3)),
+                         Methylation = as.vector(bsseq::getMeth(tnxb_p3, type = "raw")))
+
+tnxb_df <- rbind(tnxb_p1_df, tnxb_p3_df)
+
+write.csv(tnxb_df, "tnxb.csv")
+```
+
+```{r visualization}
+tnxb_cgoi <- read.csv(file.path("output", "01_DM_analyses", "observations", "210315", "tnxb_cgoi.csv"))
+
+tnxb_cgoi$start <- tnxb_cgoi$start + 1
+tnxb_cgoi <- tnxb_cgoi[tnxb_cgoi$Type == "Total",]
+
+tnxb_miseq_epic <- data.frame(pos = c(tnxb_df_chr12$start, tnxb_cgoi$start),
+                               signal = c(tnxb_df_chr12$Coverage, tnxb_cgoi$Intensity),
+                               cohort = c(rep("healthy", nrow(tnxb_df_chr12)), tnxb_cgoi$Status),
+                               sample = c(rep("miseq_sample", nrow(tnxb_df_chr12)), tnxb_cgoi$SXS_POS),
+                               type = c(rep("miseq", nrow(tnxb_df_chr12)), rep("EPIC", nrow(tnxb_cgoi))))
+
+ggplot(tnxb_miseq_epic, aes(x = pos, y = signal)) +
+  geom_point(aes(col = cohort, group = sample)) +
+  geom_line(aes(col = cohort, group = sample)) +
+  facet_wrap(~type, nrow = 2, ncol = 1, scales = "free_y") +
+  labs(title = "tnxb",
+       subtitle = "chr12:739000-740500",
+       y = "Signal") +
+  theme_bw() +
+  theme(axis.title.x = element_blank())
+
+```
+
+# RHOJ
+
+```{r}
+rhoj_p1 <- read.bismark(files = file.path("data", "bsseq", "methylation", "RHOJ_P1_S1_L001_R1_001_bismark_bt2_pe.bismark.cov.gz"),
+                      rmZeroCov = FALSE,
+                      strandCollapse = FALSE,
+                      verbose = TRUE)
+
+rhoj_p1_df <- data.frame(granges(rhoj_p1), 
+                         Coverage = as.vector(bsseq::getCoverage(rhoj_p1)),
+                         Methylation = as.vector(bsseq::getMeth(rhoj_p1, type = "raw")))
+
+rhoj_p1_df <- rhoj_p1_df[rhoj_p1_df$seqnames == 14,]
+
+rhoj_p2 <- read.bismark(files = file.path("data", "bsseq", "methylation", "RHOJ_P2_S2_L001_R1_001_bismark_bt2_pe.bismark.cov.gz"),
+                        rmZeroCov = FALSE,
+                        strandCollapse = FALSE,
+                        verbose = TRUE)
+
+rhoj_p2_df <- data.frame(granges(rhoj_p2), 
+                         Coverage = as.vector(bsseq::getCoverage(rhoj_p2)),
+                         Methylation = as.vector(bsseq::getMeth(rhoj_p2, type = "raw")))
+
+rhoj_df <- rbind(rhoj_p1_df, rhoj_p2_df)
+
+ggplot(rhoj_df, aes(x = start, y = Coverage)) +
+  geom_bar(stat = "identity") +
+  labs(title = "RHOJ",
+       subtitle = "chr14",
+       y = "Signal") +
+  theme_bw() +
+  theme(axis.title.x = element_blank())
+
+```
+
+```{r visualization}
+rhoj_cgoi$start <- rhoj_cgoi$start + 1
+rhoj_cgoi <- rhoj_cgoi[rhoj_cgoi$Type == "Total",]
+
+rhoj_miseq_epic <- data.frame(pos = c(rhoj_df$start, rhoj_cgoi$start),
+                               signal = c(rhoj_df$Coverage, rhoj_cgoi$Intensity),
+                               cohort = c(rep("healthy", nrow(rhoj_df)), rhoj_cgoi$Status),
+                               sample = c(rep("miseq_sample", nrow(rhoj_df)), rhoj_cgoi$SXS_POS),
+                               type = c(rep("miseq", nrow(rhoj_df)), rep("EPIC", nrow(rhoj_cgoi))))
+
+Cairo(width = 750, height = 1500, type = "png", file = file.path("rhoj.png"), bg = "white", units = "px", dpi = 120)
+ggplot(rhoj_df, aes(x = pos, y = signal)) +
+  geom_point(aes(col = cohort, group = sample)) +
+  geom_line(aes(col = cohort, group = sample)) +
+  facet_wrap(~type, nrow = 2, ncol = 1, scales = "free_y") +
+  labs(title = "RHOJ",
+       subtitle = "chr14",
+       y = "Signal") +
+  theme_bw() +
+  theme(axis.title.x = element_blank())
+dev.off()
+
+```

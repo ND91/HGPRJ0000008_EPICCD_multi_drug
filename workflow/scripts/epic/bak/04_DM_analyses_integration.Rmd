@@ -1,0 +1,195 @@
+---
+title: "DM analysis integration"
+author: "Andrew Y.F. Li Yim"
+date: "7/18/2018"
+output: html_document
+---
+
+Import the relevant data
+```{r setup, echo = FALSE}
+source("src/dmr_plot.R")
+
+require(minfi)
+samplesDir <- file.path("data","samples")
+
+commondataDir <- file.path("home", "ayliyim", "archive", "common_data")
+
+adaOutputDir <- file.path("output","01_DM_analyses_adalimumab")
+vedoOutputDir <- file.path("output","02_DM_analyses_vedolizumab")
+ifxOutputDir <- file.path("output","03_DM_analyses_infliximab")
+
+intDir <- file.path("output", "04_DM_analyses_integration")
+dir.create(intDir)
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+```
+
+```{r GMset}
+ada_gmset <- readRDS(file.path(adaOutputDir, "gmset_ada_filtered.Rds"))
+vedo_gmset <- readRDS(file.path(vedoOutputDir, "gmset_vedo_filtered.Rds"))
+ifx_gmset <- readRDS(file.path(ifxOutputDir, "gmset_ifx_filtered.Rds"))
+
+ada_anno <- makeGRangesFromDataFrame(getAnnotation(ada_gmset), seqnames.field = "chr", start.field = "pos", end.field = "pos", keep.extra.columns = T)
+vedo_anno <- makeGRangesFromDataFrame(getAnnotation(vedo_gmset), seqnames.field = "chr", start.field = "pos", end.field = "pos", keep.extra.columns = T)
+ifx_anno <- makeGRangesFromDataFrame(getAnnotation(ifx_gmset), seqnames.field = "chr", start.field = "pos", end.field = "pos", keep.extra.columns = T)
+
+ada_beta <- getBeta(ada_gmset)
+vedo_beta <- getBeta(vedo_gmset)
+ifx_beta <- getBeta(ifx_gmset)
+```
+
+```{r DMPs}
+dmpDir <- file.path(intDir, "dmps")
+dir.create(dmpDir)
+
+require(ggplot2)
+require(ggpubr)
+require(Cairo)
+require(ggrepel)
+
+ada_rvnr <- read.csv(file.path(adaOutputDir, "dmps", "RvNR_ada.csv"), stringsAsFactors = F)
+vedo_rvnr <- read.csv(file.path(vedoOutputDir, "dmps", "RvNR_vedo.csv"), stringsAsFactors = F)
+ifx_rvnr <- read.csv(file.path(ifxOutputDir, "dmps", "RvNR_ifx.csv"), stringsAsFactors = F)
+
+stat_cols <- c("X", "Beta", "t", "P.Value", "adj.P.Val")
+
+ada_vedo_rvnr <- merge(ada_rvnr[,stat_cols], vedo_rvnr[,stat_cols], by = "X", suffixes = c("_ada", "_vedo"))
+ada_vedo_ifx_rvnr <- merge(ada_vedo_rvnr, ifx_rvnr[,stat_cols], by = "X", suffixes = c("", "_ifx"))
+colnames(ada_vedo_ifx_rvnr) <- c("CpG", "beta_ada", "t_ada", "p_ada", "padj_ada", "beta_vedo", "t_vedo", "p_vedo", "padj_vedo", "beta_ifx", "t_ifx", "p_ifx", "padj_ifx")
+
+#ADA and VEDO
+ada_vedo_ifx_rvnr$ada_vedo_sig <- "NS"
+ada_vedo_ifx_rvnr$ada_vedo_sig[ada_vedo_ifx_rvnr$padj_ada <= 0.05 & ada_vedo_ifx_rvnr$padj_vedo <= 0.05] <- "ADA & VEDO"
+ada_vedo_ifx_rvnr$ada_vedo_sig[ada_vedo_ifx_rvnr$padj_ada > 0.05 & ada_vedo_ifx_rvnr$padj_vedo <= 0.05] <- "VEDO"
+ada_vedo_ifx_rvnr$ada_vedo_sig[ada_vedo_ifx_rvnr$padj_ada <= 0.05 & ada_vedo_ifx_rvnr$padj_vedo > 0.05] <- "ADA"
+ada_vedo_ifx_rvnr$ada_vedo_sig <- factor(ada_vedo_ifx_rvnr$ada_vedo_sig, levels = c("NS", "ADA", "ADA & VEDO", "VEDO", "VEDO & IFX", "IFX", "IFX & ADA"))
+
+#VEDO and IFX
+ada_vedo_ifx_rvnr$vedo_ifx_sig <- "NS"
+ada_vedo_ifx_rvnr$vedo_ifx_sig[ada_vedo_ifx_rvnr$padj_vedo <= 0.05 & ada_vedo_ifx_rvnr$padj_ifx <= 0.05] <- "VEDO & IFX"
+ada_vedo_ifx_rvnr$vedo_ifx_sig[ada_vedo_ifx_rvnr$padj_vedo > 0.05 & ada_vedo_ifx_rvnr$padj_ifx <= 0.05] <- "IFX"
+ada_vedo_ifx_rvnr$vedo_ifx_sig[ada_vedo_ifx_rvnr$padj_vedo <= 0.05 & ada_vedo_ifx_rvnr$padj_ifx > 0.05] <- "VEDO"
+ada_vedo_ifx_rvnr$vedo_ifx_sig <- factor(ada_vedo_ifx_rvnr$vedo_ifx_sig, levels = c("NS", "ADA", "ADA & VEDO", "VEDO", "VEDO & IFX", "IFX", "IFX & ADA"))
+
+#IFX and ADA
+ada_vedo_ifx_rvnr$ifx_ada_sig <- "NS"
+ada_vedo_ifx_rvnr$ifx_ada_sig[ada_vedo_ifx_rvnr$padj_ifx <= 0.05 & ada_vedo_ifx_rvnr$padj_ada <= 0.05] <- "IFX & ADA"
+ada_vedo_ifx_rvnr$ifx_ada_sig[ada_vedo_ifx_rvnr$padj_ifx > 0.05 & ada_vedo_ifx_rvnr$padj_ada <= 0.05] <- "ADA"
+ada_vedo_ifx_rvnr$ifx_ada_sig[ada_vedo_ifx_rvnr$padj_ifx <= 0.05 & ada_vedo_ifx_rvnr$padj_ada > 0.05] <- "IFX"
+ada_vedo_ifx_rvnr$ifx_ada_sig <- factor(ada_vedo_ifx_rvnr$ifx_ada_sig, levels = c("NS", "ADA", "ADA & VEDO", "VEDO", "VEDO & IFX", "IFX", "IFX & ADA"))
+
+#NS, ADA, ADA_VEDO, VEDO, VEDO_IFX, IFX, IFX_ADA 
+treatment_col <- c("#D3D3D3", gg_color_hue(6))
+names(treatment_col) <- c("NS", "ADA", "ADA & VEDO", "VEDO", "VEDO & IFX", "IFX", "IFX & ADA")
+
+adavvedo <- ggplot(ada_vedo_ifx_rvnr, aes(x = -log10(p_ada), y = -log10(p_vedo), col = ada_vedo_sig)) +
+  geom_point() +
+  xlim(0, 20) +
+  ylim(0, 25) +
+  ggtitle("ADA & VEDO") +
+  scale_color_manual(values = treatment_col, name= "", drop = F) +
+  theme_bw()
+
+vedovifx <- ggplot(ada_vedo_ifx_rvnr, aes(x = -log10(p_vedo), y = -log10(p_ifx), col = vedo_ifx_sig)) +
+  geom_point() +
+  xlim(0, 20) +
+  ylim(0, 25) +
+  ggtitle("VEDO & IFX") +
+  scale_color_manual(values = treatment_col, name= "", drop = F) +
+  theme_bw()
+
+ifxvada <- ggplot(ada_vedo_ifx_rvnr, aes(x = -log10(p_ifx), y = -log10(p_ada), col = ifx_ada_sig)) +
+  geom_point() +
+  xlim(0, 20) +
+  ylim(0, 25) +
+  ggtitle("IFX & ADA") +
+  scale_color_manual(values = treatment_col, name= "", drop = F) +
+  theme_bw() 
+
+cplot <- ggarrange(adavvedo, vedovifx, ifxvada, nrow = 1, ncol = 3, common.legend = T, legend = "bottom")
+
+Cairo(file = file.path(intDir, "overlapping_dmps.png"), type = "png", units = "px", width = 1600, height = 500, dpi = 90, bg = "white")
+print(cplot)
+dev.off()
+```
+
+While we observed no overlap between ADA and VEDO or VEDO and IFX, we found 3 DMPs that were statistically significant in both ADA and IFX.
+
+```{r Overlapping DMPs}
+require(NDlib)
+
+ada_ifx_cpgs <- ada_vedo_ifx_rvnr[which(ada_vedo_ifx_rvnr$ifx_ada_sig == "IFX & ADA"), "CpG"]
+ada_top5 <- ada_rvnr$X[1:5]
+vedo_top5 <- vedo_rvnr$X[1:5]
+ifx_top5 <- ifx_rvnr$X[1:5]
+
+cpgs_plot <- data.frame(cpgs = c(ada_ifx_cpgs, ada_top5, vedo_top5, ifx_top5),
+                        treatment = c(rep("ADA_IFX", length(ada_ifx_cpgs)), rep("ADA", length(ada_top5)), rep("VEDO", length(vedo_top5)), rep("IFX", length(ifx_top5))),
+                        rank = c(rep("", length(ada_ifx_cpgs)), 1:length(ada_top5), 1:length(vedo_top5), 1:length(ifx_top5)))
+
+ada_ol_cpgs_df <- ada_rvnr %>% dplyr::filter(X %in% ada_ifx_cpgs) %>% dplyr::select(c(X, Beta, logFC, AveExpr, t, P.Value, adj.P.Val))
+ada_ol_cpgs_df <- merge(ada_ol_cpgs_df, ifx_rvnr, by = "X", suffixes = c("_ADA","_IFX"))
+write.csv(ada_ol_cpgs_df, file.path(intDir, "ifx_ada_cpgs.csv"))
+
+for(i in 1:nrow(cpgs_plot)){
+  #Ada
+  ada_plot <- cpg_strip_plot(cpg_num = as.character(cpgs_plot$cpgs[i]), betas = ada_beta, factor_interest = pData(ada_gmset)$resptime, title = "ADA", enlarged = F)
+  
+  #Vedo
+  vedo_plot <- cpg_strip_plot(cpg_num = as.character(cpgs_plot$cpgs[i]), betas = vedo_beta, factor_interest = pData(vedo_gmset)$resptime, title = "VEDO", enlarged = F)
+  
+  #Ifx
+  ifx_plot <- cpg_strip_plot(cpg_num = as.character(cpgs_plot$cpgs[i]), betas = ifx_beta, factor_interest = pData(ifx_gmset)$resptime, title = "IFX", enlarged = F)
+  
+  int_plot <- ggarrange(ada_plot, ifx_plot, vedo_plot, nrow = 1, ncol = 3, legend = "none")
+  
+  plotname <- ifelse(cpgs_plot$rank[i] == "", 
+                     paste0(cpgs_plot$treatment[i], "_", cpgs_plot$cpgs[i], ".png"),
+                     paste0(cpgs_plot$rank[i], cpgs_plot$treatment[i], "_", cpgs_plot$cpgs[i], ".png"))
+  
+  Cairo(file = file.path(intDir, plotname), type = "png", units = "px", width = 1200, height = 400, dpi = 90, bg = "white")
+  print(int_plot)
+  dev.off()
+}
+```
+
+```{r DMRs}
+dmrDir <- file.path(intDir, "dmrs")
+dir.create(dmrDir)
+
+require(NDlib)
+require(ggpubr)
+
+ifx_dmrs_rvnr <- read.csv(file.path(ifxOutputDir, "dmrs", "dmrs_ifx.csv"), stringsAsFactors = F)
+ifx_dmrs_rvnr_gr <- makeGRangesFromDataFrame(ifx_dmrs_rvnr, keep.extra.columns = T, seqnames.field = "seqnames", start.field = "start", end.field = "end")
+ifx_dmr_anno <- strsplit(ifx_dmrs_rvnr_gr$overlapping.promoters, ", ")
+ifx_dmr_anno$genes <- lapply(ifx_dmr_anno, function(dmr){unique(gsub("-[0-9]{3}", "", dmr))})
+
+roi <- GRanges(seqnames = c("chr1", "chr12"), ranges = IRanges(start = c(120165303, 14926572), end = c(120165357, 14926986)))
+
+for(i in 1:5){
+  ada_plot <- dmr_plot(dmr_gr = ifx_dmrs_rvnr_gr[i], meth_data = ada_beta, anno_gr = ada_anno, meth_groups = pData(ada_gmset)$Response, title = "Adalimumab", highlight = c(start(ifx_dmrs_rvnr_gr[i]), end(ifx_dmrs_rvnr_gr[i])))
+  vedo_plot <- dmr_plot(dmr_gr = ifx_dmrs_rvnr_gr[i], meth_data = vedo_beta, anno_gr = vedo_anno, meth_groups = pData(vedo_gmset)$Response, title = "Vedolizumab", highlight = c(start(ifx_dmrs_rvnr_gr[i]), end(ifx_dmrs_rvnr_gr[i])))
+  ifx_plot <- dmr_plot(dmr_gr = ifx_dmrs_rvnr_gr[i], meth_data = ifx_beta, anno_gr = ifx_anno, meth_groups = pData(ifx_gmset)$Response, title = "Infliximab", highlight = c(start(ifx_dmrs_rvnr_gr[i]), end(ifx_dmrs_rvnr_gr[i])))
+  
+  Cairo(file = file.path(dmrDir, paste0(i, "_", gsub(":", "_", as.character(ifx_dmrs_rvnr_gr[i])), ".png")), 
+        type = "png", units = "px", width = 800, height = 1200, dpi = 90, bg = "white")
+  print(ggarrange(ada_plot, vedo_plot, ifx_plot, nrow = 3, align = "hv", common.legend = T, legend = "bottom"))
+  dev.off()
+}
+
+
+
+
+
+
+
+
+
+
+
+
+```

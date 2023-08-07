@@ -1,0 +1,339 @@
+---
+title: "Exploratory data analysis"
+author: "Andrew Y.F. Li Yim"
+date: '2022-09-26'
+output: html_document
+---
+
+The initial steps involve quality control (QC) and exploratory data analysis (EDA). The operations outlined in this notebook will be largely performed on raw or non-normalized data to understand whether samples need to be removed. The goal of the QC is to identify whether samples match their provided metadata. The goal of EDA is to understand where particular sources of variation might come from.
+
+```{r setup, include=FALSE}
+require(minfi)
+require(dplyr)
+require(shinyMethyl)
+require(ggplot2)
+require(wateRmelon)
+require(ExperimentHub)
+require(ewastools)
+require(pheatmap)
+require(broom)
+```
+
+```{r import and prepare}
+rgset <- readRDS("output/epic/rgset_qc.Rds")
+mset <- preprocessRaw(rgset)
+```
+
+```{r prepare sample metadata}
+sample_metadata <- minfi::pData(rgset) %>% 
+  data.frame
+```
+
+## Comparing estimated age with phenotype
+
+```{r age association with response and time analysis}
+paired_samples <- sample_metadata %>% 
+  dplyr::count(DonorID) %>%
+  dplyr::filter(n == 2) %>%
+  dplyr::pull(DonorID)
+
+lm_age_discrepancy_association <- sample_metadata %>%
+  dplyr::filter(DonorID %in% paired_samples) %>%
+  dplyr::group_by(DonorID) %>%
+  dplyr::mutate(T2T1differenceAge = differenceAge - differenceAge[Timepoint == "T1"]) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Treatment) %>%
+  dplyr::group_map(~ broom::tidy(lm(differenceAge ~ Response, data = .x)))
+```
+
+```{r age association with response at T1, fig.width = 10, fig.height = 3}
+lm_age_discrepancy_T1_association <- sample_metadata %>%
+  dplyr::filter(DonorID %in% paired_samples,
+                Timepoint == "T1") %>%
+  dplyr::group_by(DonorID) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Treatment) %>%
+  dplyr::group_map(~ broom::tidy(lm(Age ~ Response+Sex+DNA_plate, data = .x)))
+
+names(lm_age_discrepancy_T1_association) <- sort(unique(sample_metadata$Treatment))
+
+sample_metadata %>%
+  dplyr::filter(Timepoint == "T1") %>%
+  ggplot(aes(x = Response, y = differenceAge)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(alpha = 0.3) +
+  geom_line(aes(group = DonorID), alpha = 0.3) +
+  labs(title = "Age discrepancy by response at T1",
+       y = "Difference in years") +
+  facet_grid(.~Treatment) +
+  theme_bw() +
+  theme(legend.pos = "bottom",
+        axis.title.x = element_blank())
+```
+
+```{r age association with response at T2, fig.width = 10, fig.height = 3}
+lm_age_discrepancy_T2_association <- sample_metadata %>%
+  dplyr::filter(DonorID %in% paired_samples,
+                Timepoint == "T2") %>%
+  dplyr::group_by(DonorID) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Treatment) %>%
+  dplyr::group_map(~ broom::tidy(lm(Age ~ Response+Sex+DNA_plate, data = .x)))
+
+names(lm_age_discrepancy_T2_association) <- sort(unique(sample_metadata$Treatment))
+
+sample_metadata %>%
+  dplyr::filter(Timepoint == "T2") %>%
+  ggplot(aes(x = Response, y = differenceAge)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(alpha = 0.3) +
+  geom_line(aes(group = DonorID), alpha = 0.3) +
+  labs(title = "Age discrepancy by response at T2",
+       y = "Difference in years") +
+  facet_grid(.~Treatment) +
+  theme_bw() +
+  theme(legend.pos = "bottom",
+        axis.title.x = element_blank())
+```
+
+```{r age association with response and time, fig.width = 5, fig.height = 5}
+lm_age_discrepancy_difftime_association <- sample_metadata %>%
+  dplyr::filter(DonorID %in% paired_samples,
+                Timepoint == "T1") %>%
+  dplyr::group_by(DonorID) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Treatment) %>%
+  dplyr::group_map(~ broom::tidy(lm(differenceAge ~ Response+Sex+DNA_plate, data = .x)))
+
+names(lm_age_discrepancy_difftime_association) <- sort(unique(sample_metadata$Treatment))
+
+sample_metadata %>%
+  ggplot(aes(x = Timepoint, y = differenceAge)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(alpha = 0.3) +
+  geom_line(aes(group = DonorID), alpha = 0.3) +
+  labs(title = "Age discrepancy by response and time",
+       y = "Difference in years") +
+  facet_grid(Treatment~Response) +
+  theme_bw() +
+  theme(legend.pos = "bottom",
+        axis.title.x = element_blank())
+```
+
+There appears to be some association with methylation age among the adalimumab cohort with NR patients presenting lower methylation ages as compared to R patients. This appears to be observable at T1 and T2 with R presenting a notable increase in methylation age over time (perhaps equivalent to their actual age), whereas the NR presents a rather stagnant methylation age.
+
+```{r adalimumab age association with time, fig.width = 3, fig.height = 3}
+sample_metadata %>%
+  dplyr::filter(Treatment == "Adalimumab") %>%
+  ggplot(aes(x = Age, y = predictedAge, col = Response)) +
+  geom_abline(intercept = 0, slope = 1) +
+  geom_point(alpha = 0.3) +
+  geom_line(aes(group = DonorID), alpha = 0.3) +
+  labs(title = "Age discrepancy adalimumab",
+       x = "Actual Age",
+       y = "Predicted Age") +
+  theme_bw() +
+  theme(legend.pos = "bottom",
+        axis.title.x = element_blank())
+```
+
+It does however appear that the number of adalimumab responders are enriched for older ages.
+
+## Estimated blood cell distribution
+
+```{r blood cell distribution with response at T1}
+lm_bcd_t1_association <- sample_metadata %>%
+  dplyr::filter(Timepoint == "T1") %>%
+  tidyr::pivot_longer(c(CD8T, CD4T, NK, Bcell, Mono, Neu), names_to = "Celltype", values_to = "Abundance") %>%
+  dplyr::group_by(Treatment, Celltype) %>%
+  dplyr::group_map(~ broom::tidy(lm(Abundance ~ Response, data = .x)))
+
+(lm_bcd_t1_association_df <- do.call(rbind, lm_bcd_t1_association) %>%
+  dplyr::mutate(Treatment_celltype = sample_metadata %>%
+                  dplyr::filter(Timepoint == "T1") %>%
+                  tidyr::pivot_longer(c(CD8T, CD4T, NK, Bcell, Mono, Neu), names_to = "Celltype", values_to = "Abundance") %>%
+                  dplyr::mutate(Treatment_celltype = paste0(Treatment, "_", Celltype)) %>%
+                  dplyr::pull(Treatment_celltype) %>%
+                  unique %>%
+                  rep(., each = 2)) %>%
+  dplyr::filter(term != "(Intercept)") %>%
+  dplyr::mutate(p.adj = p.adjust(p.value, method = "fdr")) %>%
+  dplyr::arrange(p.value))
+```
+
+After correcting for multiple testing, no celltypes were differentially abundant at T1 alone when comparing R with NR for none of the medications.
+
+```{r blood cell distribution with response at T2}
+lm_bcd_t2_association <- sample_metadata %>%
+  dplyr::filter(Timepoint == "T2") %>%
+  tidyr::pivot_longer(c(CD8T, CD4T, NK, Bcell, Mono, Neu), names_to = "Celltype", values_to = "Abundance") %>%
+  dplyr::group_by(Treatment, Celltype) %>%
+  dplyr::group_map(~ broom::tidy(lm(Abundance ~ Response, data = .x)))
+
+(lm_bcd_t2_association_df <- do.call(rbind, lm_bcd_t2_association) %>%
+  dplyr::mutate(Treatment_celltype = sample_metadata %>%
+                  dplyr::filter(Timepoint == "T2") %>%
+                  tidyr::pivot_longer(c(CD8T, CD4T, NK, Bcell, Mono, Neu), names_to = "Celltype", values_to = "Abundance") %>%
+                  dplyr::mutate(Treatment_celltype = paste0(Treatment, "_", Celltype)) %>%
+                  dplyr::pull(Treatment_celltype) %>%
+                  unique %>%
+                  rep(., each = 2)) %>%
+  dplyr::filter(term != "(Intercept)") %>%
+  dplyr::mutate(p.adj = p.adjust(p.value, method = "fdr")) %>%
+  dplyr::arrange(p.value))
+```
+
+```{r blood cell distribution with response and time}
+lm_bcd_df <- sample_metadata %>%
+  dplyr::filter(DonorID %in% paired_samples) %>%
+  tidyr::pivot_longer(c(CD8T, CD4T, NK, Bcell, Mono, Neu), names_to = "Celltype", values_to = "Abundance") %>%
+  dplyr::group_by(DonorID, Celltype) %>%
+  dplyr::mutate(differenceAbundance = Abundance - Abundance[Timepoint == "T1"]) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(Timepoint == "T2") 
+
+lm_bcd_association <- lm_bcd_df %>%
+  dplyr::group_by(Treatment, Celltype) %>%
+  dplyr::group_map(~ broom::tidy(lm(differenceAbundance ~ Response+Age+Sex+DNA_plate, data = .x)))
+
+names(lm_bcd_association) <- sort(unique(paste0(lm_bcd_df$Treatment, "_", lm_bcd_df$Celltype)))
+
+lapply(lm_bcd_association, function(i){i[2,]})
+```
+
+```{r blood cell distribution with response and time visualization, fig.width = 5, fig.height = 10}
+sample_metadata %>%
+  dplyr::select(SampleID, DonorID, Response, Timepoint, Treatment, CD8T, CD4T, NK, Bcell, Mono, Neu) %>%
+  tidyr::pivot_longer(-c(SampleID, DonorID, Response, Timepoint, Treatment), names_to = "Celltype", values_to = "Abundance") %>%
+  dplyr::mutate(Treatment_celltype = paste0(Treatment, " ", Celltype)) %>%
+  ggplot(aes(x = Timepoint, y = Abundance, col = Response)) +
+    geom_line(aes(group = DonorID), alpha = 0.5) +
+    geom_point(alpha = 0.5) +  
+    geom_boxplot(outlier.shape = NA, alpha = 0.75) +
+    labs(title = "Estimated cellular abundance") +
+    facet_grid(Celltype~Treatment, scales = "free_y") +
+    theme_bw() +
+    theme(legend.pos = "bottom",
+        axis.title.x = element_blank(),
+        )
+```
+
+From our analyses, it appears that the adalimumab cohort presents the strongest significant differences in abundances in the neutrophils, CD4T, and CD8T  between T1 and T2 when comparing R with NR. Where neutrophils are lower in abundance among the NR at T1, they become slightly more abundant at T2. For the CD4T it appears that the NR do not change in their abundance, while the R increase their CD4T abundance.
+
+```{r monocyte cd4t visualization, fig.width = 5, fig.height = 10}
+sample_metadata %>%
+  dplyr::select(SampleID, DonorID, Response, Timepoint, Treatment, CD8T, CD4T, NK, Bcell, Mono, Neu) %>%
+  tidyr::pivot_longer(-c(SampleID, DonorID, Response, Timepoint, Treatment), names_to = "Celltype", values_to = "Abundance") %>%
+  dplyr::mutate(Treatment_celltype = paste0(Treatment, " ", Celltype)) %>%
+  dplyr::filter(Treatment == "Adalimumab" & Celltype %in% c("Neu", "CD4T", "CD8T")) %>%
+  ggplot(aes(x = Timepoint, y = Abundance, col = Response)) +
+    geom_line(aes(group = DonorID), alpha = 0.5) +
+    geom_point(alpha = 0.5) +  
+    geom_boxplot(outlier.shape = NA, alpha = 0.75) +
+    labs(title = "Adalimumab celltype abundance") +
+    facet_grid(Celltype~Treatment, scales = "free_y") +
+    theme_bw() +
+    theme(legend.pos = "bottom",
+        axis.title.x = element_blank(),
+        )
+```
+
+It is evident that CD4T are more abundant in NR relative to R, but that this switches at T2, when both patient cohorts are into treatment. For the monocytes, the difference appears to be more subtle.
+
+## PCA
+
+Previously, we observed that the PCA was largely driven by sex. To mitigate this effect, we can remove the allosomes.
+
+```{r pca col_treatment, fig.height = 8, fig.width = 8}
+mvals <- getM(mset)
+mvals <- mvals[-which(getAnnotation(mset)$chr %in% c("chrX", "chrY")),]
+mvals <- mvals[-which(abs(mvals) == Inf, arr.ind = T)[,1],]
+mvals <- mvals[-which(is.na(mvals), arr.ind = T)[,1],]
+mvals_dm <- mvals - rowMeans(mvals)
+mvals_svd <- svd(t(mvals_dm))
+mvals_svd_expvar <- round(mvals_svd$d/sum(mvals_svd$d), 2)*100
+
+mvals_svd_df <- data.frame(sample_metadata,
+                           PC1 = mvals_svd$u[,1],
+                           PC2 = mvals_svd$u[,2])
+
+ggplot(mvals_svd_df, aes(x = PC1, y = PC2, group = DonorID, col = Treatment)) +
+  geom_point(size = 3) +
+  theme_bw() +
+  labs(title = "PCA",
+       subtitle = "Colored by response",
+       x = paste0("PC1 (", mvals_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", mvals_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+By and large, the first PC appears to separate the treatment groups. 
+
+```{r pca col_response facet_timepoint, fig.height = 10, fig.width = 10}
+ggplot(mvals_svd_df, aes(x = PC1, y = PC2, group = DonorID, col = Response)) +
+  geom_point(size = 3) +
+  theme_bw() +
+  facet_grid(Treatment~Timepoint) +
+  labs(title = "PCA",
+       subtitle = "Colored by response, facetted by timepoint",
+       x = paste0("PC1 (", mvals_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", mvals_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+In particular, the infliximab users responders at both timepoints appear to separate ever so slightly. 
+
+## Summarized observations
+
+1. In the adalimumab cohort, we observe a higher monocyte and CD4T abundance among the NR relative to R at T1, which switches at T2, presenting a higher abundance among NR. This difference is more visible among the CD4T compared to the monocytes. While the response-associated differences at T1 and T2 appear to be non-significant, the change over time is.
+
+```{r obs1, dev=c("png", "svg", "pdf"), fig.width=10, fig.height=5}
+sample_metadata %>%
+  dplyr::select(SampleID, DonorID, Response, Timepoint, Treatment, CD8T, CD4T, NK, Bcell, Mono, Neu) %>%
+  tidyr::pivot_longer(-c(SampleID, DonorID, Response, Timepoint, Treatment), names_to = "Celltype", values_to = "Abundance") %>%
+  dplyr::mutate(Treatment_celltype = paste0(Treatment, "_", Celltype)) %>%
+  dplyr::filter(Treatment == "Adalimumab" & Celltype %in% c("CD4T", "CD8T", "Neu")) %>%
+  ggplot(aes(x = Timepoint, y = Abundance, col = Response)) +
+    geom_line(aes(group = DonorID), alpha = 0.5) +
+    geom_point(alpha = 0.5) +  
+    geom_boxplot(outlier.shape = NA, alpha = 0.75) +
+    labs(title = "Adalimumab celltype abundance") +
+    facet_wrap(~Celltype, scales = "free_y") +
+    theme_bw() +
+    theme(legend.pos = "bottom",
+        axis.title.x = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()
+        )
+```
+
+2. Principal component analysis indicates that a few infliximab responders cluster more separately from the main cluster than the NR. This effect is not observable for adalimumab.
+
+```{r obs2, dev=c("png", "svg", "pdf"), fig.height=10, fig.width=10}
+ggplot(mvals_svd_df, aes(x = PC1, y = PC2, col = Response)) +
+  geom_point(size = 3) +
+  stat_ellipse(aes(group = Response)) +
+  theme_bw() +
+  facet_grid(Treatment~Timepoint) +
+  labs(title = "PCA",
+       subtitle = "Colored by response, facetted by timepoint",
+       x = paste0("PC1 (", mvals_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", mvals_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+```{r sessionInfo}
+sessionInfo()
+```

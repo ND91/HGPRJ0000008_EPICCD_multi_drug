@@ -1,0 +1,66 @@
+import pandas as pd
+import re
+import os
+
+configfile: "config/config.yaml"
+
+basedir = config['base_dir']
+
+# Sample metadata
+sample_metadata_df = pd.read_excel(config['sample_metadata'], header=0)
+
+#treatments = ['Adalimumab', 'Infliximab', 'Vedolizumab', 'Ustekinumab', 'All']
+#treatments = ['Adalimumab', 'Vedolizumab', 'Ustekinumab', 'Infliximab']
+treatments = ['Vedolizumab', 'Ustekinumab']
+comparisons = ['T1RvNR', 'T2RvNR', 'RvNR', 'RT2vT1', 'RvNRvT2vT1']
+
+# Illumina HumanMethylation EPIC BeadChip
+
+
+# RNA-sequencing files
+# rnaseq_files_df = pd.read_excel(config['rnaseq_files'], header=0)
+# 
+# rnaseq_sampleIDs = rnaseq_files_df['SampleID'].tolist()
+# 
+# rnaseq_fastq_df = pd.concat([pd.Series(pd.concat([rnaseq_files_df['Basename'].astype(str) + '_R1', rnaseq_files_df['Basename'].astype(str) + '_R2']), name = 'old_path'), 
+#                              pd.Series(pd.concat([rnaseq_files_df['Sample_ID'].astype(str) + '_R1', rnaseq_files_df['Sample_ID'].astype(str) + '_R2']), name = 'new_path')], 
+#                             axis=1)
+# 
+# rnaseq_readfiles = rnaseq_fastq_df['new_path'].tolist()
+
+# Rules
+include: "rules/epic.smk"
+include: "rules/figures.smk"
+#include: "rules/rnaseq.smk"
+
+wildcard_constraints:
+  treatment='|'.join([re.escape(x) for x in treatments]),
+  comparison='|'.join([re.escape(x) for x in comparisons]),
+
+rule all:
+  input:
+    ## Illumina HumanMethylation EPIC BeadChip
+    #expand("{basedir}/output/epic/import/rgset.Rds", basedir=basedir),
+    expand("{basedir}/output/epic/qc/rgset_qc.Rds", basedir=basedir),
+    #expand("{basedir}/output/epic/subset/gmset_{treatment}.Rds", basedir=basedir, treatment=treatments),
+    #expand("{basedir}/output/epic/dmp/dmp_{treatment}.csv", basedir=basedir, treatment=treatments),
+    #expand("{basedir}/output/epic/dmp/dmp_{treatment}_annotated.csv", basedir=basedir, treatment=treatments),
+    expand("{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_kegg.csv", basedir=basedir, comparison=comparisons, treatment=treatments),
+    expand("{basedir}/output/epic/dmg/dmg_{comparison}_{treatment}.csv", basedir=basedir, treatment=treatments, comparison=comparisons),
+    expand("{basedir}/output/epic/dmr/dmrcate_{comparison}_{treatment}.Rds", basedir=basedir, treatment=treatments, comparison=comparisons),
+    expand("{basedir}/output/epic/icc/icc_{treatment}.csv", basedir=basedir, treatment=treatments),
+    expand("{basedir}/output/epic/horaizon/training/X_{treatment}.csv", basedir=basedir, treatment=treatments),
+    expand("{basedir}/output/epic/horaizon/validation/X_{treatment}.csv", basedir=basedir, treatment=treatments),
+    expand("{basedir}/output/epic/horaizon/multibiological_validation/X_{treatment}.csv", basedir=basedir, treatment=treatments),
+    expand("{basedir}/output/epic/horaizon/timepoint2_validation/X_{treatment}.csv", basedir=basedir, treatment=treatments),
+    ## RNA-sequencing
+    #expand("output/rnaseq/fastqc/{rnaseq_readfile}/{rnaseq_readfile}_fastqc.zip", rnaseq_readfile=rnaseq_readfiles),
+    #expand("output/rnaseq/bam/{rnaseq_sampleID}/{rnaseq_sampleID}_filtered.bam.bai", rnaseq_sampleID=rnaseq_sampleIDs),
+    #"output/rnaseq/bam/STAR.log",
+    #"output/rnaseq/counts/counts.txt",
+    #directory('{basedir}/output/rnaseq/multiqc')
+    ## Figures
+    #"expand({basedir}/workflow/scripts/epic/eda_files/figure-html/obs1-1.png", basedir=basedir),
+    #"expand({basedir}/workflow/scripts/epic/eda_files/figure-html/obs2-1.png", basedir=basedir),
+    #"expand({basedir}/output/figures/volcanoplot_RT2vT1.png", basedir=basedir),
+    #expand("{basedir}/multi_drug/output/epic/horaizon/cdpbmethlts/horaizon_markers_cdpbmethlts_ICC.pdf", basedir=basedir),

@@ -1,0 +1,330 @@
+---
+title: "DM analyses infliximab response"
+author: "Andrew Y.F. Li Yim"
+date: "7/18/2018"
+output: html_document
+---
+
+Import the relevant data
+```{r setup, echo = FALSE}
+source("src/dmr_plot.R")
+require(minfi)
+samplesDir <- file.path("data","samples")
+commondataDir <- file.path("/home", "ayliyim", "archive", "common_data")
+outputDir <- file.path("output","03_DM_analyses_infliximab")
+dir.create(outputDir)
+
+samplesheet <- read.metharray.sheet(base = samplesDir, pattern = "samplesheet_PRJ0000008_CDTNFRESP_V1.csv")
+samplesheet$Basename <- samplesheet$Path
+
+samplesheet_ifx <- samplesheet[samplesheet$Drug == "Infliximab",]
+
+rgset_ifx <- read.metharray.exp(targets = samplesheet_ifx)
+pData(rgset_ifx)$resptime <- with(pData(rgset_ifx), paste0(Response, "_", Timepoint))
+```
+
+```{r Quality control, echo = FALSE}
+edaDir <- file.path(outputDir, "eda")
+dir.create(edaDir)
+
+require(MethylAid)
+#methylaid_ifx <- summarize(samplesheet_ifx)
+#visualize(methylaid_ifx)
+
+require(shinyMethyl)
+#shinymethyl_ifx <- shinySummarize(rgset_ifx)
+#runShinyMethyl(shinymethyl_ifx)
+
+require(ewastools)
+ewastools_ifx <- read_idats(samplesheet_ifx$Basename)
+ewastools_ifx_betas <- dont_normalize(ewastools_ifx)
+ewastools_ifx_snps <- call_genotypes(ewastools_ifx_betas[ewastools_ifx$manifest[probe_type == 'rs', index], ], learn = F)
+check_snp_agreement(genotypes = ewastools_ifx_snps$gamma, weights = 1-ewastools_ifx_snps$outliers, donor_ids = samplesheet_ifx$Sample, sample_ids = samplesheet_ifx$Sample_ID)
+```
+
+According to MethylAid, all samples pass the quality control. According to shinyMethyl, there appear to be two samples with gender discrepancies. I will investigate this after preprocessing. Preprocessing is performed using the preprocessFunnorm due to its usage of noob for background correction and subsequently the control probes for correction. Additionally, the ewastools package was used to confirm that the samples were obtained from the same origin.
+As the sample pertains peripheral blood, we can utilize the estimateCellCounts function from minfi to see whether we observe any differences in estimated cell populations between the various groups.
+
+```{r Blood cell distribution}
+require("FlowSorted.Blood.EPIC")
+require(ExperimentHub)
+hub <- ExperimentHub()
+query(hub, "FlowSorted.Blood.EPIC")
+FlowSorted.Blood.EPIC <- hub[["EH1136"]]
+
+ifx_cellCounts <- estimateCellCounts(rgset_ifx, 
+                                     cellTypes = c("CD8T","CD4T","NK", "Bcell","Mono"),
+                                     compositeCellType = "Blood",
+                                     processMethod = "auto", 
+                                     probeSelect = "auto",
+                                     referencePlatform = c("IlluminaHumanMethylationEPIC"))
+ifx_cellCounts <- data.frame(ifx_cellCounts, resptime = pData(rgset_ifx)$resptime, array = rownames(ifx_cellCounts))
+
+ifx_cellCounts_melt <- reshape2::melt(ifx_cellCounts, id.vars = c("resptime", "array"), id.vals = c("Response"))
+
+ifx_cellCounts_plot <- ggplot(ifx_cellCounts_melt, aes(x = resptime, y = value)) +
+  geom_boxplot() +
+  geom_jitter() +
+  facet_wrap(~variable) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+Cairo(width = 1000, height = 1000, type = "png", file = file.path(edaDir, "ifx_estimatedCellCounts.png"), bg = "white", units = "px", dpi = 120)
+print(ifx_cellCounts_plot)
+dev.off()
+```
+
+The next step is to remove probes associated to SNPs (MAF > 0.01), sex chromosomes, and those that are promiscuous.
+
+```{r Preprocessing}
+gmset_ifx <- preprocessFunnorm(rgSet = rgset_ifx)
+gmset_ifx_nosnpcpg <- gmset_ifx[with(getSnpInfo(gmset_ifx), which(CpG_maf < 0.01 | is.na(CpG_maf))),]
+gmset_ifx_nosnpsbe <- gmset_ifx_nosnpcpg[with(getSnpInfo(gmset_ifx_nosnpcpg), which(SBE_maf < 0.01 | is.na(SBE_maf))),]
+gmset_ifx_nosex <- gmset_ifx_nosnpsbe[-which(getAnnotation(gmset_ifx_nosnpsbe)$chr %in% c("chrX", "chrY")),]
+
+pmprobes <- read.csv(file.path(commondataDir, "IlluminaHumanMethylationBeadChipEPIC", "Non-specific-probes-illuminaEPIC.csv"), stringsAsFactors = F, header = F)[,1]
+gmset_ifx_filtered <- gmset_ifx_nosex[!names(gmset_ifx_nosex) %in% pmprobes,]
+
+betas_ifx <- getBeta(gmset_ifx_filtered)
+mvals_ifx <- getM(gmset_ifx_filtered)
+```
+
+```{r Save gmset RDS}
+saveRDS(gmset_ifx_filtered, file.path(outputDir, "gmset_ifx_filtered.Rds"))
+```
+
+```{r Annotated and predicted sex}
+require(ggplot2)
+require(dplyr)
+require(ggrepel)
+
+pData(gmset_ifx) %>% 
+  data.frame %>% 
+  select(Sample_ID, Sex, predictedSex, xMed, yMed) %>%
+  mutate(Sample_label = ifelse(Sex == predictedSex, "", Sample_ID)) %>% 
+  ggplot(aes(x = xMed, y = yMed, col = Sex, label = Sample_label)) +
+  geom_text_repel(show.legend = F) +
+  geom_point(size = 4) +
+  theme_bw() +
+  ggtitle("Sex chromosome probe median intensities") +
+  xlab("chrX") +
+  ylab("chrY") +
+  theme(text = element_text(size=20))
+```
+
+Two samples in particular appear to be annotated incorrectly.
+
+```{r Sex discrepancies}
+pData(gmset_ifx)[which(pData(gmset_ifx)$Sex != pData(gmset_ifx)$predictedSex),]
+```
+
+Based on the median intensities, both samples are male, but they have been annotated as female. Besides the gender discrepancy, we want
+
+```{r Sample-sample correlation}
+betas_ifx_cor <- cor(betas_ifx)
+
+require(pheatmap)
+pheatmap(betas_ifx_cor)
+```
+
+In general, the correlation is high (>0.95), which suggests that the methylation of all samples is reasonably similar. We expect that samples derived from the same patient would show the highest pairwise correlation, but given that the correlation is already so high, it would not be strange that we might miss some.
+
+```{r PCA}
+require(plotly)
+
+mvals_ifx_dm <- mvals_ifx - rowMeans(mvals_ifx)
+mvals_ifx_svd <- svd(t(mvals_ifx_dm))
+
+mvals_svd_df <- data.frame(Sample_ID = pData(gmset_ifx_filtered)$Sample_ID,
+                           Origin = pData(gmset_ifx_filtered)$Donor_ID,
+                           Timepoint = pData(gmset_ifx_filtered)$Timepoint,
+                           Response = pData(gmset_ifx_filtered)$Response,
+                           Sex = pData(gmset_ifx_filtered)$predictedSex,
+                           PC1 = mvals_ifx_svd$u[,1],
+                           PC2 = mvals_ifx_svd$u[,2])
+
+mvals_svd_plotobj <- ggplot(mvals_svd_df, aes(x = PC1, y = PC2, Label = Sample_ID, Origin = Origin, Timepoint = Timepoint, Response = Response, Sex = Sex)) +
+  geom_point(aes(col = Timepoint)) +
+  theme_bw() +
+  theme(text = element_text(size=20))
+
+ggplotly(mvals_svd_plotobj)
+```
+
+```{r DM analyses preparation}
+design_ifx <- model.matrix(~0 + resptime + Sex + Age, data = pData(gmset_ifx_filtered))
+colnames(design_ifx) <- c("T0_NR", "T14_NR", "T0_R", "T14_R", "Male", "Age")
+mvals_lmfit_ifx <- lmFit(mvals_ifx, design = design_ifx)
+betas_lmfit_ifx <- lmFit(betas_ifx, design = design_ifx)
+
+contrast_mat_ifx <- makeContrasts(
+  RvNR = (T0_R+T14_R)/2-(T0_NR+T14_NR)/2,
+  T14vT0 = (T14_R+T14_NR)/2-(T0_R+T0_NR)/2,
+  T14RvT0R = T14_R-T0_R,
+  T14NRvT0NR = T14_NR-T0_NR,
+  TR = (T14_R-T0_R)-(T14_NR-T0_NR),
+  levels = design_ifx
+)
+
+mvals_contrastfit_ifx <- contrasts.fit(mvals_lmfit_ifx, contrast_mat_ifx)
+mvals_ebayes_ifx <- eBayes(mvals_contrastfit_ifx)
+
+betas_contrastfit_ifx <- contrasts.fit(betas_lmfit_ifx, contrast_mat_ifx)
+betas_ebayes_ifx <- eBayes(betas_contrastfit_ifx)
+```
+
+For the first analyses we will investigate whether we can find any differentially methylated positions (DMPs).
+
+```{r DMP analysis, echo = F}
+ifxdmpDir <- file.path(ifxOutputDir, "dmps")
+dir.create(ifxdmpDir)
+
+gmset_ifx_anno <- getAnnotation(gmset_ifx_filtered)
+gmset_ifx_anno_gr <- makeGRangesFromDataFrame(gmset_ifx_anno, keep.extra.columns = T, seqnames.field = "chr", start.field = "pos", end.field = "pos")
+
+RvNR_ifx_top <- topTable(mvals_ebayes_ifx, coef = "RvNR", number = "Inf", adjust.method = "BH")
+RvNR_ifx_top <- cbind(RvNR_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(RvNR_ifx_top), "RvNR"], gmset_ifx_anno[rownames(RvNR_ifx_top), ])
+T14vT0_ifx_top <- topTable(mvals_ebayes_ifx, coef = "T14vT0", number = "Inf", adjust.method = "BH")
+T14vT0_ifx_top <- cbind(T14vT0_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(T14vT0_ifx_top), "T14vT0"], gmset_ifx_anno[rownames(T14vT0_ifx_top), ])
+T14RvT0R_ifx_top <- topTable(mvals_ebayes_ifx, coef = "T14RvT0R", number = "Inf", adjust.method = "BH")
+T14RvT0R_ifx_top <- cbind(T14RvT0R_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(T14RvT0R_ifx_top), "T14RvT0R"], gmset_ifx_anno[rownames(T14RvT0R_ifx_top), ])
+T14NRvT0NR_ifx_top <- topTable(mvals_ebayes_ifx, coef = "T14NRvT0NR", number = "Inf", adjust.method = "BH")
+T14NRvT0NR_ifx_top <- cbind(T14NRvT0NR_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(T14NRvT0NR_ifx_top), "T14NRvT0NR"], gmset_ifx_anno[rownames(T14NRvT0NR_ifx_top), ])
+TR_ifx_top <- topTable(mvals_ebayes_ifx, coef = "TR", number = "Inf", adjust.method = "BH")
+TR_ifx_top <- cbind(TR_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(TR_ifx_top), "TR"], gmset_ifx_anno[rownames(TR_ifx_top), ])
+
+write.csv(RvNR_ifx_top, file.path(ifxdmpDir, "RvNR_ifx.csv"))
+write.csv(T14vT0_ifx_top, file.path(ifxdmpDir, "T14vT0_ifx.csv"))
+write.csv(T14RvT0R_ifx_top, file.path(ifxdmpDir, "T14RvT0R_ifx.csv"))
+write.csv(T14NRvT0NR_ifx_top, file.path(ifxdmpDir, "T14NRvT0NR_ifx.csv"))
+write.csv(TR_ifx_top, file.path(ifxdmpDir, "TR_ifx.csv"))
+
+RvNR_ifx_sig <- RvNR_ifx_top[RvNR_ifx_top$adj.P.Val < 0.05,]
+write.csv(RvNR_ifx_sig, file.path(ifxdmpDir, "RvNR_ifx_sig.csv"))
+```
+
+```{r IFX sig enrichment}
+require(missMethyl)
+
+ifx_dmp_enrichment <- gometh(rownames(RvNR_ifx_sig), all.cpg = NULL, collection = "KEGG", array.type = "EPIC", plot.bias = FALSE, prior.prob = TRUE)
+ifx_dmp_enrichment <- ifx_dmp_enrichment[order(ifx_dmp_enrichment$P.DE),]
+write.csv(ifx_dmp_enrichment, file.path(ifxdmpDir, "ifx_dmp_enrichment.csv"))
+```
+
+Only the responder vs non-responder comparison yielded interesting results. Again, it appears as though there is a difference of 0.5 between the responders and non-responders similar to what was observed for adalimumab and vedolizumab. 
+
+```{r IFX RvNR DMP dir}
+ifxrvnrDir <- file.path(ifxdmpDir, "RvNR")
+dir.create(ifxrvnrDir)
+```
+
+```{r Plot the top 10 RvNR}
+ifxrvnrt10Dir <- file.path(ifxrvnrDir, "top10")
+dir.create(ifxrvnrt10Dir)
+
+for(i in 1:10){
+  cpg_num <- rownames(RvNR_ifx_top)[i]
+  
+  Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(ifxrvnrt10Dir, paste0(i, "_", cpg_num, ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime) + theme(legend.position = "none"))
+  dev.off()
+  
+  Cairo(width = 400, height = 400, type = "png", file = file.path(ifxrvnrt10Dir, paste0(i, "_", cpg_num, ".png")), bg = "white", units = "px")
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime) + theme(legend.position = "none"))
+  dev.off()
+}
+```
+
+The most prominent DMP was found for cg11261447, which was found within the body of NLRP1. With a beta of ~0.60, this difference displays a stark difference between responders and non-responders. Due to this difference, one might quickly jump to the conclusion it is actually a SNP. However, no SNP was observed at this location using UCSC. 
+
+```{r cg11261447 surrounding CpGs}
+gmset_ifx_anno_gr[(which(names(gmset_ifx_anno_gr) == "cg11261447")-2):(which(names(gmset_ifx_anno_gr) == "cg11261447")+2),]
+```
+
+Surprisingly, there nearest EPIC probes are 2000 bps further, which makes it hard to investigate the methylation status of the surrounding region. A wise followup experiment would therefore be a bisulfite sequencing experiment on this region in particular to validate the results technically, but also to investigate whether the surrounding CpGs are differentially methylated
+
+```{r cg11261447 region plot}
+print(dmr_plot(dmr_gr = makeGRangesFromDataFrame(df = RvNR_ifx_top[1,], seqnames.field = "chr", start.field = "pos", end.field = "pos"),
+               flanks = 3000,
+               meth_data = betas_ifx, 
+               anno_gr = gmset_ifx_anno_gr, 
+               meth_groups = pData(gmset_ifx_filtered)$Response, 
+               title = "cg11261447 3000bps"))
+
+NDlib::dmr_genome_plot()
+```
+
+We observe that 2000 bps downstream the methylation levels are the same, so likely the effect would be localized. Cross-referencing our data with UCSC, suggests that CTCF and DNase I HS sites are located at this particular CpG suggesting regulatory functionality. In an articly by Maurano et al. 2015 the authors suggest that while DNA methylation affects CTCF occupancy in some cases.
+The role of NLRP1 in infliximab has been alluded to before in the Dubinsky et al. 2010. The strange thing is that they state that rs302827 (chr19:56410222[C/T]) is associated to NLRP13, NLRP8, and NLRP1. While NLRP13 and NLRP8 are located on chr19, NLRP1 is located on chr17. Nonetheless, perhaps NLRP proteins in general are associated with inflammatory diseases and the response towards medication. NLRP stands for Nodd-like receptor.
+
+The DMPs appear to be located across several genes, we will now investigate whether any of these genes have multiple DMPs, and perhaps share regulatory elements.
+
+```{r Genes with multiple IFXresp-DMPs}
+ifxrvnrmdmpsDir <- file.path(ifxrvnrDir, "mdmps")
+dir.create(ifxrvnrmdmpsDir)
+
+ifxsig_genes <- do.call(c, lapply(strsplit(x = RvNR_ifx_sig$UCSC_RefGene_Name, ";"), unique))
+ifxsig_genes_freq <- sort(table(ifxsig_genes))
+ifxsig_genes_mDMPs <- names(which(ifxsig_genes_freq > 1))
+
+ifxsig_genes_mDMPs_min <- do.call(rbind, lapply(ifxsig_genes_mDMPs, function(i) {
+  df <- RvNR_ifx_sig[grep(i, RvNR_ifx_sig$UCSC_RefGene_Name),]
+  df_min <- with(df, data.frame(seqnames = unique(chr),
+                                start = min(pos),
+                                end = max(pos),
+                                gene = i))
+  return(df_min)
+}))
+
+ifxsig_genes_mDMPs_gr <- makeGRangesFromDataFrame(ifxsig_genes_mDMPs_min, keep.extra.columns = T)
+
+for(i in 1:length(ifxsig_genes_mDMPs_gr)){
+  Cairo(width = 2000, height = 2000, type = "pdf", file = file.path(ifxrvnrmdmpsDir, paste0(ifxsig_genes_mDMPs_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_plot(dmr_gr = ifxsig_genes_mDMPs_gr[i], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = as.character(ifxsig_genes_mDMPs_gr$gene[i])))
+  dev.off()
+  
+    Cairo(width = 500, height = 500, type = "png", file = file.path(ifxrvnrmdmpsDir, paste0(ifxsig_genes_mDMPs_gr$gene[i], ".png")), bg = "white", units = "px")
+  print(dmr_plot(dmr_gr = ifxsig_genes_mDMPs_gr[i], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = as.character(ifxsig_genes_mDMPs_gr$gene[i])))
+  dev.off()
+}
+```
+
+```{r dmrs}
+ifxdmrDir <- file.path(outputDir, "dmrs")
+dir.create(ifxdmrDir)
+
+require(DMRcate)
+dmr_anno_rvnr_ifx <- cpg.annotate(object = mvals_ifx,
+                                  datatype = "array",
+                                  arraytype = "EPIC",
+                                  what = "M",
+                                  analysis.type = "differential",
+                                  design = design_ifx,
+                                  contrasts = T,
+                                  cont.matrix = contrast_mat_ifx,
+                                  coef = "RvNR")
+dmr_rvnr_ifx <- dmrcate(dmr_anno_rvnr_ifx, lambda = 1000, C = 2, min.cpgs = 3, mc.cores = 8, pcutoff = 0.05)
+dmr_rvnr_ifx_gr <- extractRanges(dmr_rvnr_ifx, genome = "hg19")
+
+write.csv(as.data.frame(dmr_rvnr_ifx_gr), file.path(ifxdmrDir, "dmrs_ifx.csv"))
+
+dmr_plot(dmr_gr = dmr_rvnr_ifx_gr[2], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response)
+```
+
+The DMRs do not appear to yield much more relevant hits than what we have found previously, in particular, chr19:23941207-23942137 was also found when investigating genes with multiple DMPs.
+
+```{r vmrs}
+vmr_anno_rvnr_ifx <- cpg.annotate(object = mvals_ifx,
+                                  datatype = "array",
+                                  arraytype = "EPIC",
+                                  what = "M",
+                                  analysis.type = "variability",
+                                  design = design_ifx,
+                                  contrasts = T,
+                                  cont.matrix = contrast_mat_ifx,
+                                  coef = "RvNR")
+vmr_rvnr_ifx <- dmrcate(vmr_anno_rvnr_ifx, lambda = 1000, C = 2, min.cpgs = 3, mc.cores = 8, pcutoff = 0.05)
+vmr_rvnr_ifx_gr <- extractRanges(vmr_rvnr_ifx, genome = "hg19")
+
+dmr_plot(dmr_gr = vmr_rvnr_ifx_gr[1], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response)
+```

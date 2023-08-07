@@ -1,0 +1,3540 @@
+---
+title: "DM analyses response"
+author: "Andrew Y.F. Li Yim"
+date: "11 November 2017"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+In this report we will perform the differential methylation analyses on responders and non-responders towards the integrin \alpha4\beta7 agonist vedolizumab and the TNF agonists adalimumab and infliximab. The three different cohorts were obtained in three separate batches. 
+
+From 00_Phenosheet_analysis.Rmd we had already found that there was a slight issue with the genders (i.e. we had female responders and non-responders, but no male non-responders). 
+
+```{r setup, echo = FALSE}
+#necessary packages
+require(pheatmap)
+require(gridExtra)
+require(grid)
+require(cowplot)
+require(ggpubr)
+require(minfi)
+require(reshape2)
+require(NDlib)
+require(Homo.sapiens)
+require(ggbio)
+require(Cairo)
+require(biomaRt)
+require(dplyr)
+require(TxDb.Hsapiens.UCSC.hg19.knownGene)
+require(rvest)
+
+source("src/01_DM_analyses/dmr_plot.R")
+source("src/01_DM_analyses/dmr_effect_plot.R")
+
+#setup input directories
+samplesDir <- file.path("data","samples")
+commondataDir <- file.path("/home", "ayliyim", "archive", "common_data")
+
+#setup output directories
+outputDir <- file.path("output","01_DM_analyses")
+dir.create(outputDir)
+dmpDir <- file.path(outputDir, "dmps")
+dir.create(dmpDir)
+dmrDir <- file.path(outputDir, "dmrs")
+dir.create(dmrDir)
+rdsDir <- file.path(outputDir, "rds")
+dir.create(rdsDir)
+
+#import samples
+samplesheet <- read.metharray.sheet(base = samplesDir, pattern = "samplesheet_PRJ0000008_CDMEDRESP_V4.csv")
+samplesheet$Basename <- samplesheet$Path
+samplesheet$resptime <- with(samplesheet, paste0(Response, "_", Timepoint))
+
+samplesheet_vedo <- samplesheet[samplesheet$Drug == "Vedolizumab",]
+samplesheet_ada <- samplesheet[samplesheet$Drug == "Adalimumab",]
+samplesheet_ifx <- samplesheet[samplesheet$Drug == "Infliximab",]
+
+#prepare rgset
+rgset_vedo <- read.metharray.exp(targets = samplesheet_vedo)
+rgset_ada <- read.metharray.exp(targets = samplesheet_ada)
+rgset_ifx <- read.metharray.exp(targets = samplesheet_ifx)
+rgset <- read.metharray.exp(targets = samplesheet, force = T)
+
+#import promiscuous probes
+pmprobes <- read.csv(file.path(commondataDir, "IlluminaHumanMethylationBeadChipEPIC", "Non-specific-probes-illuminaEPIC.csv"), stringsAsFactors = F, header = F)[,1]
+
+#import previous summary data
+pubsum <- read.csv(file.path("data", "public_studies", "public_summary_statistics.csv"), stringsAsFactors = F)
+
+#import enhancer regions
+enhancers <- read.csv("/home/ayliyim/archive/projects/FAC0000001_REGR/output/ActivePromoterEnhancerLinks_hg19_annotated.csv", stringsAsFactors = F)[,-1]
+colnames(enhancers)[1:3] <- c("baitChr", "baitStart", "baitEnd")
+enhancers_gr <- makeGRangesFromDataFrame(enhancers, keep.extra.columns = T, seqnames.field = "oeChr", start.field = "oeSt", end.field = "oeEnd")
+enhancers_gr <- enhancers_gr[enhancers_gr$distanceToTSS == 0,]
+
+#biomart
+enssnp_mart <- useMart(biomart = "ENSEMBL_MART_SNP", host = "grch37.ensembl.org", path = "/biomart/martservice", dataset = "hsapiens_snp")
+
+#pheatmap setup
+breaksList <- seq(0, 1, by = 0.01)
+
+#ggplot colors
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+#Overrepresentation plotter
+overrep_plotter <- function(pvals, pathway, N = 10){
+  plot_df <- data.frame(pvalue = pvals,
+                        pathway = factor(pathway, levels = rev(pathway)), 
+                        stringsAsFactors = F)
+  ggplot(plot_df[1:N,], aes(y = -log10(pvalue), x = pathway)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_bw() +
+    theme(axis.title.y = element_blank())
+}
+
+#KEGG pathways
+#c2_symbols <- read.gmt("/home/ayliyim/archive/common_data/gene_sets/msigdb/c2.all.v6.2.symbols.gmt")
+kegg_hs <- EnrichmentBrowser::getGenesets("hsa", db = "kegg")
+```
+
+Quality control is based on multiple quality control probes on the array that test for hybridization success and bisulfite conversion. Thresholds as implemented by MethylAid should give a good idea of whether any batch effects are observable. Additionally, the ewastools package was used to confirm that the samples were obtained from the same origin as some samples across the different studies were obtained from the same patient as evidence by the donor ID. 
+
+```{r Quality control, echo = FALSE}
+edaDir <- file.path(outputDir, "eda")
+dir.create(edaDir)
+
+# require(MethylAid)
+# methylaid_obj <- summarize(samplesheet, force = T)
+# visualize(methylaid_obj)
+# 
+# require(shinyMethyl)
+# shinymethyl_obj <- shinySummarize(rgset)
+# runShinyMethyl(shinymethyl_obj)
+
+require(ewastools)
+ewastools_obj <- read_idats(samplesheet$Basename)
+ewastools_betas <- dont_normalize(ewastools_obj)
+ewastools_snps <- call_genotypes(ewastools_betas[ewastools_obj$manifest[probe_type == 'rs', index], ], learn = F)
+ewastools_snpagreement <- check_snp_agreement(genotypes = ewastools_snps, donor_ids = samplesheet$Donor_ID, sample_ids = samplesheet$SXS)
+
+saveRDS(ewastools_snps, file.path(rdsDir, "ewastools_snps.Rds"))
+#cleanup
+rm(ewastools_obj, ewastools_betas, ewastools_snps, ewastools_snpagreement)
+gc()
+```
+
+The adalimumab samples appear to display a discrepancy. Specifically, sample 102858-001-007 (C083) displays more similarity to 102858-001-022 (C038) than to 102858-001-023 (C083). Similarly, 102858-001-008 (C038) displays more similarity to 102858-001-023 (C083) than to 102858-001-022 (C038). A sample switch is therefore very likely. One of the C083 or C038 samples have been switched, it is just not entirely clear where and when it happened. Having discussed the issue with the professors in charge, it appears that the
+
+```{r ada mislabeled samples}
+samplesheet[grep("102858-001-022", samplesheet$SXS), "Donor_ID"] <- "C083"
+samplesheet[grep("102858-001-022", samplesheet$SXS), "Response"] <- "Responder"
+samplesheet[grep("102858-001-022", samplesheet$SXS), "Sample_ID"] <- "C083_T2"
+samplesheet[grep("102858-001-022", samplesheet$SXS), "resptime"] <- "Responder_T2"
+samplesheet[grep("102858-001-022", samplesheet$SXS), "Age"] <- 51
+
+samplesheet[grep("102858-001-023", samplesheet$SXS), "Donor_ID"] <- "C038"
+samplesheet[grep("102858-001-023", samplesheet$SXS), "Response"] <- "Nonresponder"
+samplesheet[grep("102858-001-023", samplesheet$SXS), "Sample_ID"] <- "C038_T2"
+samplesheet[grep("102858-001-023", samplesheet$SXS), "resptime"] <- "Nonresponder_T2"
+samplesheet[grep("102858-001-023", samplesheet$SXS), "Age"] <- 31
+
+samplesheet_ada <- samplesheet[samplesheet$Drug == "Adalimumab",]
+
+rgset_ada <- read.metharray.exp(targets = samplesheet_ada)
+
+write.csv(samplesheet, file.path(samplesDir, "samplesheet_PRJ0000008_CDMEDRESP_fixed.csv"))
+```
+
+#Blood cell distribution estimation
+
+The next few steps will include blood cell estimation, normalization and subsequent differential methylation analysis after which we will perform enrichment analysis. The final step is to build a classifier using the raw data.
+
+```{r Blood cell distribution}
+require(FlowSorted.Blood.EPIC)
+require(ExperimentHub)
+
+if(!file.exists(file.path(edaDir, "estimatedCellProportion.csv"))){
+  hub <- ExperimentHub()
+  FlowSorted.Blood.EPIC <- hub[["EH1136"]]
+  
+  cellDist <- estimateCellCounts(rgset, 
+                                 cellTypes = c("CD8T", "CD4T", "NK", "Bcell", "Mono", "Neu"),
+                                 compositeCellType = "Blood",
+                                 processMethod = "auto", 
+                                 probeSelect = "auto",
+                                 referencePlatform = c("IlluminaHumanMethylationEPIC"))
+  cellDist <- data.frame(cellDist, 
+                         response = pData(rgset)$Response,
+                         timepoint = pData(rgset)$Timepoint,
+                         donor = pData(rgset)$Donor_ID,
+                         array = rownames(cellDist),
+                         drug = pData(rgset)$Drug)
+  write.csv(cellDist, file.path(edaDir, "estimatedCellProportion.csv"))
+} else{
+  cellDist <- read.csv(file.path(edaDir, "estimatedCellProportion.csv"), row.names = 1, stringsAsFactors = F)
+}
+
+cellDist_melt <- reshape2::melt(cellDist, id.vars = c("response", "timepoint", "array", "donor", "drug"), value.name = "Proportion")
+
+cellDist_plot <- cellDist_melt %>% 
+  filter(drug !=  "Vedolizumab") %>%
+  ggplot(aes(x = timepoint, y = Proportion, col = response)) +
+  geom_point(aes(group = donor), alpha = 0.25, show.legend = F) +
+  geom_line(aes(group = donor, alpha = 0.25), linetype = "dotted", show.legend = F) +
+  geom_smooth(method = "lm", aes(group = response), se = F) +
+  facet_grid(drug ~ variable) +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        text = element_text(size = 12))
+
+Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(edaDir, "aTNF_Proportion.pdf"), bg = "white", units = "px", dpi = 120)
+print(cellDist_plot)
+dev.off()
+```
+
+The cell distributions do not show very large differences, suggesting that any changes do not occur in the blood-associated CpGs.
+
+In the next few chunks, we will perform comparative differential methylation analyses. TWe will need to perform some degree of preprocessing. Usually we would remove probes binding to CpGs that lie on genetic variants, but this time we retain them as we are searching for biomarkers representative of response regardless of modality. Subsequent investigation will need to uncover the source of the signal.
+
+#Vedolizumab
+
+```{r vedo preprocessing}
+gmset_vedo <- preprocessFunnorm(rgSet = rgset_vedo)
+#gmset_vedo_processed <- gmset_vedo[with(getSnpInfo(gmset_vedo), which(CpG_maf < 0.01 | is.na(CpG_maf))),]
+#gmset_vedo_processed <- gmset_vedo[with(getSnpInfo(gmset_vedo), which(SBE_maf < 0.01 | is.na(SBE_maf))),]
+gmset_vedo_processed <- gmset_vedo[-which(minfi::getAnnotation(gmset_vedo)$chr %in% c("chrX", "chrY")),]
+
+gmset_vedo_filtered <- gmset_vedo_processed[!names(gmset_vedo_processed) %in% pmprobes,]
+
+betas_vedo <- getBeta(gmset_vedo_filtered)
+mvals_vedo <- getM(gmset_vedo_filtered)
+
+mvals_vedo <- mvals_vedo[-which(mvals_vedo == -Inf, arr.ind = T)[,1],]
+```
+
+```{r vedo predicted sex}
+require(ggplot2)
+require(dplyr)
+require(ggrepel)
+
+pData(gmset_vedo_filtered) %>% 
+  data.frame %>% 
+  select(Sample_ID, Sex, predictedSex, xMed, yMed) %>%
+  mutate(Sample_label = ifelse(Sex == predictedSex, "", Sample_ID)) %>% 
+  ggplot(aes(x = xMed, y = yMed, col = Sex, label = Sample_label)) +
+  geom_text_repel(show.legend = F) +
+  geom_point(size = 4) +
+  theme_bw() +
+  ggtitle("Sex chromosome probe median intensities") +
+  xlab("chrX") +
+  ylab("chrY") +
+  theme(text = element_text(size=12),
+        legend.position = "bottom")
+```
+
+Four samples derived from 2 donors appear to be mixed up, namely F097 and F096 appear to be labeled incorrectly. After having discussed with the professor in question, it appeared the labels have been mixed up for these two donors.
+
+```{r vedo mislabeled samples}
+F096_samples <- grep("F096", samplesheet$Donor_ID)
+F097_samples <- grep("F097", samplesheet$Donor_ID)
+
+samplesheet[F096_samples, "Sex"] <- "F"
+samplesheet[F096_samples, "Sample_ID"] <- gsub("F096", "F097", samplesheet[F096_samples, "Sample_ID"])
+samplesheet[F096_samples, "Donor_ID"] <- gsub("F096", "F097", samplesheet[F096_samples, "Donor_ID"])
+samplesheet[F097_samples, "Sex"] <- "M"
+samplesheet[F097_samples, "Sample_ID"] <- gsub("F097", "F096", samplesheet[F097_samples, "Sample_ID"])
+samplesheet[F097_samples, "Donor_ID"] <- gsub("F097", "F096", samplesheet[F097_samples, "Donor_ID"])
+
+write.csv(samplesheet, file.path(samplesDir, "samplesheet_PRJ0000008_CDMEDRESP_fixed.csv"))
+```
+
+Having changed the metadata to the correct names, we need to re-import the data.
+
+```{r vedo re-import data}
+samplesheet <- read.metharray.sheet(base = samplesDir, pattern = "samplesheet_PRJ0000008_CDMEDRESP_fixed.csv")
+samplesheet$Basename <- samplesheet$Path
+
+samplesheet_vedo <- samplesheet[samplesheet$Drug == "Vedolizumab",]
+samplesheet_ada <- samplesheet[samplesheet$Drug == "Adalimumab",]
+samplesheet_ifx <- samplesheet[samplesheet$Drug == "Infliximab",]
+
+#prepare rgset
+rgset_vedo <- read.metharray.exp(targets = samplesheet_vedo)
+rgset <- read.metharray.exp(targets = samplesheet, force = T)
+```
+
+```{r vedo re-preprocessing}
+gmset_vedo <- preprocessFunnorm(rgSet = rgset_vedo)
+#gmset_vedo_processed <- gmset_vedo[with(getSnpInfo(gmset_vedo), which(CpG_maf < 0.01 | is.na(CpG_maf))),]
+#gmset_vedo_processed <- gmset_vedo[with(getSnpInfo(gmset_vedo), which(SBE_maf < 0.01 | is.na(SBE_maf))),]
+gmset_vedo_processed <- gmset_vedo[-which(minfi::getAnnotation(gmset_vedo)$chr %in% c("chrX", "chrY")),]
+
+gmset_vedo_filtered <- gmset_vedo_processed[!names(gmset_vedo_processed) %in% pmprobes,]
+
+betas_vedo <- getBeta(gmset_vedo_filtered)
+mvals_vedo <- getM(gmset_vedo_filtered)
+
+mvals_vedo <- mvals_vedo[-which(mvals_vedo == -Inf, arr.ind = T)[,1],]
+```
+
+We can now check whether the samples are correct.
+
+```{r vedo check samples}
+require(ggplot2)
+require(dplyr)
+require(ggrepel)
+
+pData(gmset_vedo_filtered) %>% 
+  data.frame %>% 
+  select(Sample_ID, Sex, predictedSex, xMed, yMed) %>%
+  mutate(Sample_label = ifelse(Sex == predictedSex, "", Sample_ID)) %>% 
+  ggplot(aes(x = xMed, y = yMed, col = Sex, label = Sample_label)) +
+  geom_text_repel(show.legend = F) +
+  geom_point(size = 4) +
+  theme_bw() +
+  ggtitle("Sex chromosome probe median intensities") +
+  xlab("chrX") +
+  ylab("chrY") +
+  theme(text = element_text(size=12),
+        legend.position = "bottom")
+```
+
+```{r vedo Sample-sample correlation}
+betas_vedo_cor <- cor(betas_vedo)
+
+require(pheatmap)
+pheatmap(betas_vedo_cor)
+```
+
+In general, the correlation is high (>0.98), which suggests that the methylation of all samples is reasonably similar. We expect that samples derived from the same patient would show the highest pairwise correlation, but given that the correlation is already so high, it would not be strange that we might miss some.
+
+```{r vedo PCA}
+mvals_vedo_dm <- mvals_vedo - rowMeans(mvals_vedo)
+mvals_vedo_svd <- svd(t(mvals_vedo_dm))
+mvals_vedo_svd_expvar <- round(mvals_vedo_svd$d/sum(mvals_vedo_svd$d), 2)*100
+
+mvals_vedo_svd_df <- data.frame(Sample_ID = pData(gmset_vedo_filtered)$Sample_ID,
+                                Origin = pData(gmset_vedo_filtered)$Donor_ID,
+                                Timepoint = pData(gmset_vedo_filtered)$Timepoint,
+                                Response = pData(gmset_vedo_filtered)$Response,
+                                Sex = pData(gmset_vedo_filtered)$predictedSex,
+                                Age = pData(gmset_vedo_filtered)$Age,
+                                PC1 = mvals_vedo_svd$u[,1],
+                                PC2 = mvals_vedo_svd$u[,2])
+
+mvals_vedo_svd_plotobj <- ggplot(mvals_vedo_svd_df, aes(x = PC1, y = PC2, Label = Sample_ID, Origin = Origin, Timepoint = Timepoint, Response = Response, Sex = Sex, Age = Age)) +
+  geom_point(aes(col = Response, shape = Timepoint), size = 4) +
+  theme_bw() +
+  xlab(paste0("PC1 (", mvals_vedo_svd_expvar[1], "%)")) +
+  ylab(paste0("PC2 (", mvals_vedo_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+
+mvals_vedo_svd_corr <- data.frame(rbind(NDlib::svd_correlator(evs = mvals_vedo_svd$u, confounder = pData(gmset_vedo_filtered)$Sex)[[1]],
+                                NDlib::svd_correlator(evs = mvals_vedo_svd$u, confounder = pData(gmset_vedo_filtered)$Age)[[1]],
+                                NDlib::svd_correlator(evs = mvals_vedo_svd$u, confounder = pData(gmset_vedo_filtered)$Timepoint)[[1]],
+                                NDlib::svd_correlator(evs = mvals_vedo_svd$u, confounder = pData(gmset_vedo_filtered)$Response)[[1]]),
+                          variable = rep(c("Sex", "Age", "Timepoint", "Response"), each = ncol(mvals_vedo_svd$u)))
+
+mvals_vedo_svd_corr_plotobj <- ggplot(mvals_vedo_svd_corr, aes(x = PC, y = Correlation, fill = variable)) +
+  geom_hline(yintercept = 0) +
+  geom_point(shape = 21, size = 4) +
+  ylim(-0.1, 1) +
+  ylab(expression(R^2)) +
+  theme_bw() +
+  theme(text = element_text(size = 12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+There appears to be two samples from one donor that behave distinct from the rest
+
+```{r vedo outlier sample}
+mvals_vedo_svd_df[mvals_vedo_svd_df$PC2 %in% sort(mvals_vedo_svd_df$PC2, decreasing = T)[1:2],]
+```
+
+F139 is an outlier. Not sure what to do with it at the moment.
+
+```{r vedo DM analyses preparation}
+require(limma)
+
+design_vedo <- model.matrix(~0 + resptime + Sex + Age, data = pData(gmset_vedo_filtered))
+colnames(design_vedo) <- c("T1_NR", "T2_NR", "T1_R", "T2_R", "Male", "Age")
+mvals_lmfit_vedo <- lmFit(mvals_vedo, design = design_vedo)
+betas_lmfit_vedo <- lmFit(betas_vedo, design = design_vedo)
+
+contrast_mat_vedo <- makeContrasts(
+  RvNR = (T1_R+T2_R)/2-(T1_NR+T2_NR)/2,
+  T2vT1 = (T2_R+T2_NR)/2-(T1_R+T1_NR)/2,
+  T2RvT1R = T2_R-T1_R,
+  T2NRvT1NR = T2_NR-T1_NR,
+  TR = (T2_R-T1_R)-(T2_NR-T1_NR),
+  levels = design_vedo
+)
+
+mvals_contrastfit_vedo <- contrasts.fit(mvals_lmfit_vedo, contrast_mat_vedo)
+mvals_ebayes_vedo <- eBayes(mvals_contrastfit_vedo)
+
+betas_contrastfit_vedo <- contrasts.fit(betas_lmfit_vedo, contrast_mat_vedo)
+betas_ebayes_vedo <- eBayes(betas_contrastfit_vedo)
+```
+
+```{r vedo DM analyses preparation timepoint 1}
+gmset_vedo_t1 <- gmset_vedo_filtered[, pData(gmset_vedo_filtered)$Timepoint == "T1"]
+
+design_vedo_t1 <- model.matrix(~Response + Sex + Age, data = pData(gmset_vedo_t1))
+colnames(design_vedo_t1) <- c("(Intercept)", "R", "Male", "Age")
+mvals_lmfit_vedo_t1 <- lmFit(getM(gmset_vedo_t1), design = design_vedo_t1)
+mvals_lmfit_vedo_t1 <- eBayes(mvals_lmfit_vedo_t1)
+betas_lmfit_vedo_t1 <- lmFit(getBeta(gmset_vedo_t1), design = design_vedo_t1)
+betas_lmfit_vedo_t1 <- eBayes(betas_lmfit_vedo_t1)
+```
+
+```{r vedo DM analyses preparation timepoint 2}
+gmset_vedo_t2 <- gmset_vedo_filtered[, pData(gmset_vedo_filtered)$Timepoint == "T2"]
+
+design_vedo_t2 <- model.matrix(~Response + Sex + Age, data = pData(gmset_vedo_t2))
+colnames(design_vedo_t2) <- c("(Intercept)", "R", "Male", "Age")
+mvals_lmfit_vedo_t2 <- lmFit(getM(gmset_vedo_t2), design = design_vedo_t2)
+mvals_lmfit_vedo_t2 <- eBayes(mvals_lmfit_vedo_t2)
+betas_lmfit_vedo_t2 <- lmFit(getBeta(gmset_vedo_t2), design = design_vedo_t2)
+betas_lmfit_vedo_t2 <- eBayes(betas_lmfit_vedo_t2)
+```
+
+For the first analyses we will investigate whether we can find any differentially methylated positions (DMPs).
+
+```{r vedo dmp analysis, echo = F}
+vedodmpDir <- file.path(dmpDir, "vedolizumab")
+dir.create(vedodmpDir)
+
+gmset_vedo_anno <- minfi::getAnnotation(gmset_vedo_filtered)
+gmset_vedo_anno_gr <- makeGRangesFromDataFrame(gmset_vedo_anno, keep.extra.columns = T, seqnames.field = "chr", start.field = "pos", end.field = "pos")
+
+gmset_vedo_anno_enh_ol <- findOverlaps(query = gmset_vedo_anno_gr, subject = enhancers_gr)
+gmset_vedo_anno_enh_ol <- data.frame(gmset_vedo_anno_enh_ol, enh_gene = enhancers_gr[subjectHits(gmset_vedo_anno_enh_ol),]$SYMBOL)
+gmset_vedo_anno_enh_ol_list <- split(gmset_vedo_anno_enh_ol, gmset_vedo_anno_enh_ol$queryHits)
+gmset_vedo_anno_enh_genes <- do.call(rbind, lapply(gmset_vedo_anno_enh_ol_list, function(cpg){
+  paste(cpg$enh_gene, collapse = ";")
+}))
+
+gmset_vedo_anno_gr$enhancer_gene <- ""
+gmset_vedo_anno_gr$enhancer_gene[as.numeric(rownames(gmset_vedo_anno_enh_genes))] <- gmset_vedo_anno_enh_genes
+
+RvNR_vedo_top <- topTable(mvals_ebayes_vedo, coef = "RvNR", number = "Inf", adjust.method = "BH")
+RvNR_vedo_top <- cbind(RvNR_vedo_top, Beta = coefficients(betas_ebayes_vedo)[rownames(RvNR_vedo_top), "RvNR"], data.frame(gmset_vedo_anno_gr[rownames(RvNR_vedo_top), ]))
+RvNR_vedo_top_gr <- makeGRangesFromDataFrame(RvNR_vedo_top, keep.extra.columns = T)
+
+T2vT1_vedo_top <- topTable(mvals_ebayes_vedo, coef = "T2vT1", number = "Inf", adjust.method = "BH")
+T2vT1_vedo_top <- cbind(T2vT1_vedo_top, Beta = coefficients(betas_ebayes_vedo)[rownames(T2vT1_vedo_top), "T2vT1"], data.frame(gmset_vedo_anno_gr[rownames(T2vT1_vedo_top), ]))
+cpg_strip_plot(cpg_num = rownames(T2vT1_vedo_top)[1], betas = getBeta(gmset_vedo_t1), factor_interest = pData(gmset_vedo_t1)$Response, type = "SE")
+
+T2RvT1R_vedo_top <- topTable(mvals_ebayes_vedo, coef = "T2RvT1R", number = "Inf", adjust.method = "BH")
+T2RvT1R_vedo_top <- cbind(T2RvT1R_vedo_top, Beta = coefficients(betas_ebayes_vedo)[rownames(T2RvT1R_vedo_top), "T2RvT1R"], data.frame(gmset_vedo_anno_gr[rownames(T2RvT1R_vedo_top), ]))
+
+T2NRvT1NR_vedo_top <- topTable(mvals_ebayes_vedo, coef = "T2NRvT1NR", number = "Inf", adjust.method = "BH")
+T2NRvT1NR_vedo_top <- cbind(T2NRvT1NR_vedo_top, Beta = coefficients(betas_ebayes_vedo)[rownames(T2NRvT1NR_vedo_top), "T2NRvT1NR"], data.frame(gmset_vedo_anno_gr[rownames(T2NRvT1NR_vedo_top), ]))
+
+T1RvNR_vedo_top <- topTable(mvals_lmfit_vedo_t1, coef = "R", number = "Inf", adjust.method = "BH")
+T1RvNR_vedo_top <- cbind(T1RvNR_vedo_top, Beta = coefficients(betas_lmfit_vedo_t1)[rownames(T1RvNR_vedo_top), "R"], data.frame(gmset_vedo_anno_gr[rownames(T1RvNR_vedo_top), ]))
+cpg_strip_plot(cpg_num = rownames(T1RvNR_vedo_top)[1], betas = getBeta(gmset_vedo_t1), factor_interest = pData(gmset_vedo_t1)$Response, type = "SE")
+
+T2RvNR_vedo_top <- topTable(mvals_lmfit_vedo_t2, coef = "R", number = "Inf", adjust.method = "BH")
+T2RvNR_vedo_top <- cbind(T2RvNR_vedo_top, Beta = coefficients(betas_lmfit_vedo_t2)[rownames(T2RvNR_vedo_top), "R"], data.frame(gmset_vedo_anno_gr[rownames(T2RvNR_vedo_top), ]))
+
+TR_vedo_top <- topTable(mvals_ebayes_vedo, coef = "TR", number = "Inf", adjust.method = "BH")
+TR_vedo_top <- cbind(TR_vedo_top, Beta = coefficients(betas_ebayes_vedo)[rownames(TR_vedo_top), "TR"], data.frame(gmset_vedo_anno_gr[rownames(TR_vedo_top), ]))
+
+write.csv(RvNR_vedo_top, file.path(vedodmpDir, "RvNR_vedo.csv"))
+write.csv(T2vT1_vedo_top, file.path(vedodmpDir, "T2vT1_vedo.csv"))
+write.csv(T2RvT1R_vedo_top, file.path(vedodmpDir, "T2RvT1R_vedo.csv"))
+write.csv(T2NRvT1NR_vedo_top, file.path(vedodmpDir, "T2NRvT1NR_vedo.csv"))
+write.csv(TR_vedo_top, file.path(vedodmpDir, "TR_vedo.csv"))
+
+Cairo(width = 1000, height = 1000, type = "png", file = file.path(vedodmpDir, "volcano_vedo_RvNR.png"), bg = "white", units = "px", dpi = 120)
+print(with(RvNR_vedo_top, volcano_plot(effect_sizes = Beta, 
+                                       pvals = P.Value, 
+                                       int_effect_threshold = 0.1, 
+                                       significance = adj.P.Val < 0.05, 
+                                       identifiers = rownames(RvNR_vedo_top), 
+                                       title = "Vedolizumab: Responders vs non-responders")))
+dev.off()
+```
+
+Both the responders vs non-responders comparison appears to have yielded interesting results. 
+
+```{r vedo dmps sig}
+RvNR_vedo_sig <- RvNR_vedo_top[RvNR_vedo_top$adj.P.Val < 0.05,]
+write.csv(RvNR_vedo_sig, file.path(vedodmpDir, "RvNR_vedo_sig.csv"))
+RvNR_vedo_sig_gr <- makeGRangesFromDataFrame(df = RvNR_vedo_sig, keep.extra.columns = T, seqnames.field = "chr", start.field = "pos", end.field = "pos")
+
+RvNR_vedo_hm_anno_col <- data.frame(row.names = rownames(pData(gmset_vedo_filtered)),
+                                    Response = pData(gmset_vedo_filtered)$Response,
+                                    Donor = pData(gmset_vedo_filtered)$Donor_ID,
+                                    Timepoint = pData(gmset_vedo_filtered)$Timepoint)
+
+RvNR_vedo_hm_anno_row <- data.frame(row.names = rownames(RvNR_vedo_sig),
+                                    pGV_MAF = RvNR_vedo_sig$Probe_maf,
+                                    cGV_MAF = RvNR_vedo_sig$CpG_maf)
+
+RvNR_vedo_hm <- grid.grabExpr(pheatmap(mat = betas_vedo[rownames(RvNR_vedo_sig),],
+                                       annotation_col = RvNR_vedo_hm_anno_col,
+                                       annotation_row = RvNR_vedo_hm_anno_row,
+                                       breaks = breaksList, 
+                                       show_colnames = F))
+
+Cairo(width = 1000, height = 1000, type = "png", file = file.path(vedodmpDir, "heatmap_vedo_RvNR_sig.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(RvNR_vedo_hm)
+dev.off()
+
+cpg_strip_plot(cpg_num = rownames(RvNR_vedo_sig)[1], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, type = "SE")
+```
+
+Two non-responding samples appear to behave differently when looking at the most significant CpG (cg01110291)
+
+```{r vedo strange sample}
+pData(gmset_vedo_filtered)[names(sort(betas_vedo[rownames(RvNR_vedo_sig)[1],pData(gmset_vedo_filtered)$Response == "Nonresponder"], decreasing = T)[1:2]),]
+```
+
+```{r cg01110291 surrounding CpGs}
+gmset_vedo_anno_gr[(which(names(gmset_vedo_anno_gr) == "cg01110291")-2):(which(names(gmset_vedo_anno_gr) == "cg01110291")+2),]
+```
+
+```{r cg01110291 region plot}
+print(dmr_plot(dmr_gr = makeGRangesFromDataFrame(df = RvNR_vedo_top[1,], seqnames.field = "seqnames", start.field = "start", end.field = "end"),
+               flanks = 1500,
+               meth_data = betas_vedo, 
+               anno_gr = gmset_vedo_anno_gr, 
+               meth_groups = pData(gmset_vedo_filtered)$Response, 
+               title = "cg24051749 1500bps"))
+```
+
+Nearest CpG appears to be >1500 bps upstream, thereby making any regional inferences rather difficult.
+
+```{r vedo genes with multiple dmps}
+RvNR_vedo_mdmpDir <- file.path(vedodmpDir, "gene_mdmps")
+dir.create(RvNR_vedo_mdmpDir)
+
+RvNR_vedo_sig_genes <- do.call(c, lapply(strsplit(x = paste0(RvNR_vedo_sig$UCSC_RefGene_Name, ";", RvNR_vedo_sig$enhancer_gene), ";"), unique))
+RvNR_vedo_sig_genes_freq <- sort(table(RvNR_vedo_sig_genes))
+RvNR_vedo_sig_genes_bg <- unlist(lapply(names(RvNR_vedo_sig_genes_freq), function(gene){length(grep(gene, paste0(gmset_vedo_anno_gr$UCSC_RefGene_Name, ";", gmset_vedo_anno_gr$enhancer_gene)))}))
+names(RvNR_vedo_sig_genes_bg) <- names(RvNR_vedo_sig_genes_freq)
+RvNR_vedo_sig_genes_prop <- data.frame(frequency = as.vector(RvNR_vedo_sig_genes_freq),
+                                       background = as.vector(RvNR_vedo_sig_genes_bg),
+                                       proportion = as.vector(RvNR_vedo_sig_genes_freq)/as.vector(RvNR_vedo_sig_genes_bg),
+                                       row.names = names(RvNR_vedo_sig_genes_freq))
+
+RvNR_vedo_sig_genes_prop_mdmp <- RvNR_vedo_sig_genes_prop[RvNR_vedo_sig_genes_prop$frequency>1,]
+RvNR_vedo_sig_genes_prop_mdmp <- RvNR_vedo_sig_genes_prop_mdmp[order(RvNR_vedo_sig_genes_prop_mdmp$proportion, decreasing = T),]
+
+write.csv(RvNR_vedo_sig_genes_prop, file.path(vedodmpDir, "RvNR_vedo_DMP_prop.csv"))
+```
+
+```{r vedo dmeg}
+#All DMEGs
+RvNR_vedo_sig_gene_mdmp <- rownames(RvNR_vedo_sig_genes_prop_mdmp)
+RvNR_vedo_sig_gene_mdmp <- RvNR_vedo_sig_gene_mdmp[-which(RvNR_vedo_sig_gene_mdmp == "")]
+
+RvNR_vedo_sig_gene_mdmp_gr <- makeGRangesFromDataFrame(do.call(rbind, lapply(RvNR_vedo_sig_gene_mdmp, function(i) {
+  df <- RvNR_vedo_sig[grep(i, paste0(RvNR_vedo_sig$UCSC_RefGene_Name, ";", RvNR_vedo_sig$enhancer_gene)),]
+  df_min <- with(df, data.frame(seqnames = unique(seqnames),
+                                start = min(start),
+                                end = max(end),
+                                gene = i))
+  
+  return(df_min)
+})), keep.extra.columns = T)
+
+for(i in 1:length(RvNR_vedo_sig_gene_mdmp_gr)){
+  Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(RvNR_vedo_mdmpDir, paste0(RvNR_vedo_sig_gene_mdmp_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_effect_plot(region_of_interest = RvNR_vedo_sig_gene_mdmp_gr[i,], tophits = RvNR_vedo_top_gr))
+  dev.off()
+}
+```
+
+```{r vedo dmeg location}
+GPR146 <- RvNR_vedo_top_gr[grep("GPR146", paste0(RvNR_vedo_top_gr$GencodeBasicV12_NAME, ";", RvNR_vedo_top_gr$enhancer_gene)),]
+```
+
+```{r vedo sig dmp KEGG overrepresentation}
+require(missMethyl)
+
+RvNR_vedo_dmp_enrichment <- gometh(sig.cpg = rownames(RvNR_vedo_sig), all.cpg = rownames(gmset_vedo_anno), collection = "KEGG", array.type = "EPIC", plot.bias = FALSE, prior.prob = TRUE)
+RvNR_vedo_dmp_enrichment <- RvNR_vedo_dmp_enrichment[order(RvNR_vedo_dmp_enrichment$P.DE),]
+write.csv(RvNR_vedo_dmp_enrichment, file.path(vedodmpDir, "vedo_dmp_enrichment.csv"))
+
+```
+
+```{r vedo RvNR visualization}
+vedorvnrDir <- file.path(vedodmpDir, "figures")
+dir.create(vedorvnrDir)
+
+for(i in 1:nrow(RvNR_vedo_sig)){
+  cpg_num <- rownames(RvNR_vedo_top)[i]
+  
+  stitle <- paste0(RvNR_vedo_top$seqnames[i], ":", RvNR_vedo_top$start[i])
+  
+  if(!is.na(RvNR_vedo_top$Probe_rs[i])){
+    stitle <- paste0(stitle, " pGV: ", RvNR_vedo_top$Probe_rs[i], " (MAF:", RvNR_vedo_top$Probe_maf[i], ")")
+  } else if(!is.na(RvNR_vedo_top$CpG_rs[i])){
+    stitle <- paste0(stitle, " cGV: ", RvNR_vedo_top$CpG_rs[i], " (MAF:", RvNR_vedo_top$CpG_maf[i], ")")
+  } else if(!is.na(RvNR_vedo_top$SBE_rs[i])){
+    stitle <- paste0(stitle, " cGV: ", RvNR_vedo_top$SBE_rs[i], " (MAF", RvNR_vedo_top$SBE_maf[i], ")")
+  }
+  
+  Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(vedorvnrDir, paste0(i, "_", cpg_num, ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_vedo, 
+                              factor_interest = pData(gmset_vedo_filtered)$resptime, 
+                              legend = F) + 
+          labs(subtitle = stitle))
+  dev.off()
+  
+  Cairo(width = 500, height = 500, type = "png", file = file.path(vedorvnrDir, paste0(i, "_", cpg_num, ".png")), bg = "white", units = "px")
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_vedo, 
+                              factor_interest = pData(gmset_vedo_filtered)$resptime, 
+                              legend = F) +
+          labs(subtitle = stitle))
+  dev.off()
+}
+```
+
+```{r vedo dmrs}
+vedodmrDir <- file.path(dmrDir, "vedolizumab")
+dir.create(vedodmrDir)
+
+require(DMRcate)
+require(ChIPpeakAnno)
+require(biomaRt)
+
+set.seed(1893412839)
+
+RvNR_dmr_vedo_anno <- cpg.annotate(object = mvals_vedo,
+                                   datatype = "array",
+                                   arraytype = "EPIC",
+                                   what = "M",
+                                   analysis.type = "differential",
+                                   design = design_vedo,
+                                   contrasts = T,
+                                   cont.matrix = contrast_mat_vedo,
+                                   coef = "RvNR")
+RvNR_dmr_vedo <- dmrcate(RvNR_dmr_vedo_anno, lambda = 1000, C = 2, min.cpgs = 3, mc.cores = 8, pcutoff = 0.05)
+RvNR_dmr_vedo_gr <- extractRanges(RvNR_dmr_vedo, genome = "hg19")
+
+RvNR_dmr_vedo_cpaanno <- annotatePeakInBatch(myPeakList = RvNR_dmr_vedo_gr, 
+                                             AnnotationData = genes(TxDb.Hsapiens.UCSC.hg19.knownGene),
+                                             output="nearestBiDirectionalPromoters",
+                                             bindingRegion=c(-5000, 1000))
+
+RvNR_dmr_vedo_cpaanno$SYMBOL <- mapIds(x = org.Hs.eg.db, 
+                                       keys = as.character(RvNR_dmr_vedo_cpaanno$gene_id), 
+                                       column = "SYMBOL", 
+                                       keytype = "ENTREZID", 
+                                       multiVals="first")
+
+names(RvNR_dmr_vedo_cpaanno) <- 1:length(RvNR_dmr_vedo_cpaanno)
+
+write.csv(as.data.frame(RvNR_dmr_vedo_cpaanno), file.path(vedodmrDir, "RvNR_vedo.csv"))
+
+vedodmrplot1 <- dmr_plot(dmr_gr = RvNR_dmr_vedo_gr[1], meth_data = betas_vedo, anno_gr = gmset_vedo_anno_gr, meth_groups = pData(gmset_vedo_filtered)$Response, title = "(No annotated gene)", highlight = c(start(RvNR_dmr_vedo_gr[1]), end(RvNR_dmr_vedo_gr[1])))
+vedodmrplot2 <- dmr_plot(dmr_gr = RvNR_dmr_vedo_gr[2], meth_data = betas_vedo, anno_gr = gmset_vedo_anno_gr, meth_groups = pData(gmset_vedo_filtered)$Response, title = "(No annotated gene)", highlight = c(start(RvNR_dmr_vedo_gr[2]), end(RvNR_dmr_vedo_gr[2])))
+vedodmrplot3 <- dmr_plot(dmr_gr = RvNR_dmr_vedo_gr[3], meth_data = betas_vedo, anno_gr = gmset_vedo_anno_gr, meth_groups = pData(gmset_vedo_filtered)$Response, title = "(No annotated gene)", highlight = c(start(RvNR_dmr_vedo_gr[3]), end(RvNR_dmr_vedo_gr[3])))
+```
+
+```{r vedo snp dmps}
+RvNR_vedo_tdmps <- RvNR_vedo_sig[is.na(RvNR_vedo_sig$CpG_maf) & is.na(RvNR_vedo_sig$Probe_maf),]
+RvNR_vedo_pgvs <- RvNR_vedo_sig[!is.na(RvNR_vedo_sig$Probe_maf),]
+RvNR_vedo_cgvs <- RvNR_vedo_sig[!is.na(RvNR_vedo_sig$CpG_maf),]
+
+rs_vedo <- c(RvNR_vedo_pgvs$Probe_rs, RvNR_vedo_cgvs$CpG_rs)
+write.csv(rs_vedo, file.path(dmpDir, "rs_vedo.csv"))
+```
+
+```{r vedo response dmps across time}
+RvNR_vedo_resp_time_df <- data.frame(CpG = rownames(RvNR_vedo_sig),
+                                     RvNR_beta = RvNR_vedo_sig$Beta,
+                                     RvNR_pval = RvNR_vedo_sig$P.Value,
+                                     RvNR_padj = RvNR_vedo_sig$adj.P.Val,
+                                     T2vT1_betas = T2vT1_vedo_top[rownames(RvNR_vedo_sig),"Beta"],
+                                     T2vT1_pval = T2vT1_vedo_top[rownames(RvNR_vedo_sig),"P.Value"],
+                                     T2vT1_padj = T2vT1_vedo_top[rownames(RvNR_vedo_sig),"adj.P.Val"])
+RvNR_vedo_resp_time_df$label <- c("Top", rep("Not", nrow(RvNR_vedo_resp_time_df)-1))
+```
+
+```{r save vedo gmset}
+saveRDS(gmset_vedo_filtered, file.path(rdsDir, "gmset_vedo_filtered.Rds"))
+```
+
+```{r vedo elastic net}
+vedo_glmnet <- cv.glmnet(x = t(getBeta(gmset_vedo_filtered)), 
+                         y = as.factor(pData(gmset_vedo_filtered)$Response), 
+                         family = "binomial", 
+                         standardize = T,
+                         alpha = 0.5)
+vedo_pred <- predict(vedo_glmnet, newx = t(getBeta(gmset_vedo_filtered)), s = "lambda.1se", type = "class")
+data.frame(predicted = vedo_pred[,1], actual = pData(gmset_vedo_filtered)$Response)
+
+vedo_nz_coefs <- coef(vedo_glmnet, s = "lambda.1se")[,1][which(coef(vedo_glmnet)[,1] != 0)]
+table(names(vedo_nz_coefs)[-1] %in% rownames(RvNR_vedo_sig))
+
+rownames(RvNR_vedo_sig)
+```
+
+#Adalimumab
+
+```{r ada preprocessing}
+gmset_ada <- preprocessFunnorm(rgSet = rgset_ada)
+# gmset_ada <- gmset_ada[with(getSnpInfo(gmset_ada), which(CpG_maf < 0.01 | is.na(CpG_maf))),]
+# gmset_ada <- gmset_ada[with(getSnpInfo(gmset_ada), which(SBE_maf < 0.01 | is.na(SBE_maf))),]
+gmset_ada_nosex <- gmset_ada[-which(minfi::getAnnotation(gmset_ada)$chr %in% c("chrX", "chrY")),]
+
+gmset_ada_filtered <- gmset_ada_nosex[!names(gmset_ada_nosex) %in% pmprobes,]
+saveRDS(gmset_ada_filtered, file.path(outputDir, "gmset_ada_filtered.Rds"))
+
+betas_ada <- getBeta(gmset_ada_filtered)
+mvals_ada <- getM(gmset_ada_filtered)
+
+mvals_ada <- mvals_ada[-which(mvals_ada == -Inf, arr.ind = T)[,1],]
+```
+
+```{r ada annotated and predicted sex}
+require(ggplot2)
+require(dplyr)
+require(ggrepel)
+
+pData(gmset_ada) %>% 
+  data.frame %>% 
+  select(Sample_ID, Sex, predictedSex, xMed, yMed) %>%
+  mutate(Sample_label = ifelse(Sex == predictedSex, "", Sample_ID)) %>% 
+  ggplot(aes(x = xMed, y = yMed, col = Sex, label = Sample_label)) +
+  geom_text_repel(show.legend = F) +
+  geom_point(size = 4) +
+  theme_bw() +
+  ggtitle("Sex chromosome probe median intensities") +
+  xlab("chrX") +
+  ylab("chrY") +
+  theme(text = element_text(size = 12))
+```
+
+```{r ada sample-sample correlation}
+betas_ada_cor <- cor(betas_ada)
+
+require(pheatmap)
+pheatmap(betas_ada_cor)
+```
+
+In general, the correlation is high (>0.975), which suggests that the methylation of all samples is reasonably similar. We expect that samples derived from the same patient would show the highest pairwise correlation, but given that the correlation is already so high, it would not be strange that we might miss some.
+
+```{r ada PCA}
+mvals_ada_dm <- mvals_ada - rowMeans(mvals_ada)
+mvals_ada_svd <- svd(t(mvals_ada_dm))
+mvals_ada_svd_expvar <- round(mvals_ada_svd$d/sum(mvals_ada_svd$d), 2)*100
+
+mvals_ada_svd_df <- data.frame(Sample_ID = pData(gmset_ada_filtered)$Sample_ID,
+                               Origin = pData(gmset_ada_filtered)$Donor_ID,
+                               Timepoint = pData(gmset_ada_filtered)$Timepoint,
+                               Response = pData(gmset_ada_filtered)$Response,
+                               Sex = pData(gmset_ada_filtered)$predictedSex,
+                               Age = pData(gmset_ada_filtered)$Age,
+                               PC1 = mvals_ada_svd$u[,1],
+                               PC2 = mvals_ada_svd$u[,2])
+
+mvals_ada_svd_plotobj <- ggplot(mvals_ada_svd_df, aes(x = PC1, y = PC2, Label = Sample_ID, Origin = Origin, Timepoint = Timepoint, Response = Response, Sex = Sex, Age = Age)) +
+  geom_point(aes(col = Response, shape = Timepoint), size = 4) +
+  theme_bw() +
+  xlab(paste0("PC1 (", mvals_ada_svd_expvar[1], "%)")) +
+  ylab(paste0("PC2 (", mvals_ada_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+
+mvals_ada_svd_corr <- data.frame(rbind(NDlib::svd_correlator(evs = mvals_ada_svd$u, confounder = pData(gmset_ada_filtered)$Sex)[[1]],
+                                NDlib::svd_correlator(evs = mvals_ada_svd$u, confounder = pData(gmset_ada_filtered)$Age)[[1]],
+                                NDlib::svd_correlator(evs = mvals_ada_svd$u, confounder = pData(gmset_ada_filtered)$Timepoint)[[1]],
+                                NDlib::svd_correlator(evs = mvals_ada_svd$u, confounder = pData(gmset_ada_filtered)$Response)[[1]]),
+                          variable = rep(c("Sex", "Age", "Timepoint", "Response"), each = ncol(mvals_ada_svd$u)))
+
+mvals_ada_svd_corr_plotobj <- ggplot(mvals_ada_svd_corr, aes(x = PC, y = Correlation, fill = variable)) +
+  geom_hline(yintercept = 0) +
+  geom_point(shape = 21, size = 4) +
+  ylim(-0.1, 1) +
+  ylab(expression(R^2)) +
+  theme_bw() +
+  theme(text = element_text(size = 12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+```{r ada DM analyses preparation}
+require(limma)
+
+design_ada <- model.matrix(~0 + resptime + Sex + Age, data = pData(gmset_ada_filtered))
+colnames(design_ada) <- c("T1_NR", "T2_NR", "T1_R", "T2_R", "Male", "Age")
+mvals_lmfit_ada <- lmFit(mvals_ada, design = design_ada)
+betas_lmfit_ada <- lmFit(betas_ada, design = design_ada)
+
+contrast_mat_ada <- makeContrasts(
+  RvNR = (T1_R+T2_R)/2-(T1_NR+T2_NR)/2,
+  T2vT1 = (T2_R+T2_NR)/2-(T1_R+T1_NR)/2,
+  T2RvT1R = T2_R-T1_R,
+  T2NRvT1NR = T2_NR-T1_NR,
+  TR = (T2_R-T1_R)-(T2_NR-T1_NR),
+  levels = design_ada
+)
+
+mvals_contrastfit_ada <- contrasts.fit(mvals_lmfit_ada, contrast_mat_ada)
+mvals_ebayes_ada <- eBayes(mvals_contrastfit_ada)
+
+betas_contrastfit_ada <- contrasts.fit(betas_lmfit_ada, contrast_mat_ada)
+betas_ebayes_ada <- eBayes(betas_contrastfit_ada)
+```
+
+For the first analyses we will investigate whether we can find any differentially methylated positions (DMPs).
+
+```{r ada dmp analysis, echo = F}
+adadmpDir <- file.path(dmpDir, "adalimumab")
+dir.create(adadmpDir)
+
+gmset_ada_anno <- minfi::getAnnotation(gmset_ada_filtered)
+gmset_ada_anno_gr <- makeGRangesFromDataFrame(gmset_ada_anno, keep.extra.columns = T, seqnames.field = "chr", start.field = "pos", end.field = "pos")
+
+gmset_ada_anno_enh_ol <- findOverlaps(query = gmset_ada_anno_gr, subject = enhancers_gr)
+gmset_ada_anno_enh_ol <- data.frame(gmset_ada_anno_enh_ol, enh_gene = enhancers_gr[subjectHits(gmset_ada_anno_enh_ol),]$SYMBOL)
+gmset_ada_anno_enh_ol_list <- split(gmset_ada_anno_enh_ol, gmset_ada_anno_enh_ol$queryHits)
+gmset_ada_anno_enh_genes <- do.call(rbind, lapply(gmset_ada_anno_enh_ol_list, function(cpg){
+  paste(cpg$enh_gene, collapse = ";")
+}))
+
+gmset_ada_anno_gr$enhancer_gene <- ""
+gmset_ada_anno_gr$enhancer_gene[as.numeric(rownames(gmset_ada_anno_enh_genes))] <- gmset_ada_anno_enh_genes
+
+RvNR_ada_top <- topTable(mvals_ebayes_ada, coef = "RvNR", number = "Inf", adjust.method = "BH")
+RvNR_ada_top <- cbind(RvNR_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(RvNR_ada_top), "RvNR"], as.data.frame(gmset_ada_anno_gr[rownames(RvNR_ada_top), ]))
+RvNR_ada_top_gr <- makeGRangesFromDataFrame(RvNR_ada_top, keep.extra.columns = T)
+T2vT1_ada_top <- topTable(mvals_ebayes_ada, coef = "T2vT1", number = "Inf", adjust.method = "BH")
+T2vT1_ada_top <- cbind(T2vT1_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(T2vT1_ada_top), "T2vT1"], as.data.frame(gmset_ada_anno_gr[rownames(RvNR_ada_top), ]))
+T2RvT1R_ada_top <- topTable(mvals_ebayes_ada, coef = "T2RvT1R", number = "Inf", adjust.method = "BH")
+T2RvT1R_ada_top <- cbind(T2RvT1R_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(T2RvT1R_ada_top), "T2RvT1R"], as.data.frame(gmset_ada_anno_gr[rownames(RvNR_ada_top), ]))
+T2NRvT1NR_ada_top <- topTable(mvals_ebayes_ada, coef = "T2NRvT1NR", number = "Inf", adjust.method = "BH")
+T2NRvT1NR_ada_top <- cbind(T2NRvT1NR_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(T2NRvT1NR_ada_top), "T2NRvT1NR"], as.data.frame(gmset_ada_anno_gr[rownames(RvNR_ada_top), ]))
+TR_ada_top <- topTable(mvals_ebayes_ada, coef = "TR", number = "Inf", adjust.method = "BH")
+TR_ada_top <- cbind(TR_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(TR_ada_top), "TR"], as.data.frame(gmset_ada_anno_gr[rownames(RvNR_ada_top), ]))
+
+write.csv(RvNR_ada_top, file.path(adadmpDir, "RvNR_ada.csv"))
+write.csv(T2vT1_ada_top, file.path(adadmpDir, "T2vT1_ada.csv"))
+write.csv(T2RvT1R_ada_top, file.path(adadmpDir, "T2RvT1R_ada.csv"))
+write.csv(T2NRvT1NR_ada_top, file.path(adadmpDir, "T2NRvT1NR_ada.csv"))
+write.csv(TR_ada_top, file.path(adadmpDir, "TR_ada.csv"))
+
+Cairo(width = 1000, height = 1000, type = "png", file = file.path(adadmpDir, "volcano_ada_RvNR.png"), bg = "white", units = "px", dpi = 120)
+print(with(RvNR_ada_top, volcano_plot(effect_sizes = Beta, 
+                                      pvals = P.Value, 
+                                      int_effect_threshold = 0.1, 
+                                      significance = adj.P.Val < 0.05, 
+                                      identifiers = rownames(RvNR_ada_top), 
+                                      title = "Adalimumab: Responders vs non-responders")))
+dev.off()
+```
+
+Only the responders vs non-responders comparison appears to have yielded interesting results. However, the top result from T2vT1 and T2RvT1R (cg06743153) appears to show some interesting differences as well, which suggests an interaction between time and response. This is especially evident when comparing the responders at T2 with the responders at T1.
+
+```{r ada dmps sig}
+RvNR_ada_sig <- RvNR_ada_top[RvNR_ada_top$adj.P.Val < 0.05,]
+write.csv(RvNR_ada_sig, file.path(adadmpDir, "RvNR_ada_sig.csv"))
+
+RvNR_ada_hm_anno_col <- data.frame(row.names = rownames(pData(gmset_ada_filtered)),
+                                   Response = pData(gmset_ada_filtered)$Response,
+                                   Donor = pData(gmset_ada_filtered)$Donor_ID,
+                                   Timepoint = pData(gmset_ada_filtered)$Timepoint)
+
+RvNR_ada_hm_anno_row <- data.frame(row.names = rownames(RvNR_ada_sig),
+                                   pGV_MAF = RvNR_ada_sig$Probe_maf,
+                                   cGV_MAF = RvNR_ada_sig$CpG_maf)
+
+RvNR_ada_hm <- grid.grabExpr(pheatmap(mat = betas_ada[rownames(RvNR_ada_sig),],
+                                      annotation_col = RvNR_ada_hm_anno_col,
+                                      annotation_row = RvNR_ada_hm_anno_row,
+                                      breaks = breaksList, 
+                                      show_colnames = F))
+
+Cairo(width = 1000, height = 2500, type = "png", file = file.path(adadmpDir, "heatmap_ada_RvNR_sig.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(RvNR_ada_hm)
+dev.off()
+```
+
+```{r cg24051749 surrounding CpGs}
+gmset_ada_anno_gr[(which(names(gmset_ada_anno_gr) == "cg24051749")-2):(which(names(gmset_ada_anno_gr) == "cg24051749")+2),]
+```
+
+```{r cg24051749 region plot}
+print(dmr_plot(dmr_gr = makeGRangesFromDataFrame(df = RvNR_ada_top[1,], seqnames.field = "seqnames", start.field = "start", end.field = "end"),
+               flanks = 1500,
+               meth_data = betas_ada, 
+               anno_gr = gmset_ada_anno_gr, 
+               meth_groups = pData(gmset_ada_filtered)$Response, 
+               title = "cg24051749 1000bps"))
+```
+
+```{r ada sig dmp KEGG overrepresentation}
+require(missMethyl)
+
+RvNR_ada_dmp_enrichment <- gometh(rownames(RvNR_ada_sig), all.cpg = rownames(gmset_ada_anno), collection = "KEGG", array.type = "EPIC", plot.bias = FALSE, prior.prob = TRUE)
+RvNR_ada_dmp_enrichment <- RvNR_ada_dmp_enrichment[order(RvNR_ada_dmp_enrichment$P.DE),]
+write.csv(RvNR_ada_dmp_enrichment, file.path(adadmpDir, "ada_dmp_enrichment.csv"))
+```
+
+```{r ada dmprom KEGG enrichment}
+require(ChIPpeakAnno)
+require(dplyr)
+require(fgsea)
+
+RvNR_gene_ada_top_gr <- annotatePeakInBatch(myPeakList = makeGRangesFromDataFrame(RvNR_ada_top, keep.extra.columns = T), 
+                                            AnnotationData = unlist(reduce(transcriptsBy(x = TxDb.Hsapiens.UCSC.hg19.knownGene, by = "gene"))), 
+                                            output="nearestBiDirectionalPromoters",
+                                            bindingRegion=c(-5000, 1000))
+
+RvNR_gene_ada_top_agg <- RvNR_gene_ada_top_gr %>% 
+  data.frame() %>%
+  group_by(feature) %>%
+  dplyr::summarize(MeanBeta = mean(Beta, na.rm=TRUE))
+
+RvNR_gene_ada_top_bd <- RvNR_gene_ada_top_agg$MeanBeta
+names(RvNR_gene_ada_top_bd) <- RvNR_gene_ada_top_agg$feature
+
+RvNR_gene_ada_obj <- fgsea(pathways = kegg_hs, 
+                           stats = RvNR_gene_ada_top_bd,
+                           minSize = 15,
+                           maxSize = 500,
+                           nperm = 10000)
+RvNR_gene_ada_obj <- RvNR_gene_ada_obj[order(RvNR_gene_ada_obj$pval),]
+
+RvNR_gene_ada_obj$ID <- gsub("^[A-Z0-9_]+_MM_(.+)_Ensembl$", "\\1", RvNR_gene_ada_obj$pathway)
+kegg_RvNR_gene_ada <- data.frame(RvNR_gene_ada_obj)[-8]
+
+write.csv(kegg_RvNR_gene_ada, file.path(adadmpDir, "kegg_RvNR_gene_ada.csv"))
+```
+
+```{r ada genes with multiple dmps}
+RvNR_ada_mdmpDir <- file.path(adadmpDir, "gene_mdmps")
+dir.create(RvNR_ada_mdmpDir)
+
+RvNR_ada_sig_genes <- do.call(c, lapply(strsplit(x = paste0(RvNR_ada_sig$UCSC_RefGene_Name, ";", RvNR_ada_sig$enhancer_gene), ";"), unique))
+RvNR_ada_sig_genes_freq <- sort(table(RvNR_ada_sig_genes))
+RvNR_ada_sig_genes_bg <- unlist(lapply(names(RvNR_ada_sig_genes_freq), function(gene){length(grep(gene, paste0(gmset_ada_anno_gr$UCSC_RefGene_Name, ";", gmset_ada_anno_gr$enhancer_gene)))}))
+names(RvNR_ada_sig_genes_bg) <- names(RvNR_ada_sig_genes_freq)
+RvNR_ada_sig_genes_prop <- data.frame(frequency = as.vector(RvNR_ada_sig_genes_freq),
+                                       background = as.vector(RvNR_ada_sig_genes_bg),
+                                       proportion = as.vector(RvNR_ada_sig_genes_freq)/as.vector(RvNR_ada_sig_genes_bg),
+                                       row.names = names(RvNR_ada_sig_genes_freq))
+
+RvNR_ada_sig_genes_prop_mdmp <- RvNR_ada_sig_genes_prop[RvNR_ada_sig_genes_prop$frequency>1,]
+RvNR_ada_sig_genes_prop_mdmp <- RvNR_ada_sig_genes_prop_mdmp[order(RvNR_ada_sig_genes_prop_mdmp$proportion, decreasing = T),]
+RvNR_ada_sig_genes_prop_mdmp <- RvNR_ada_sig_genes_prop_mdmp[rownames(RvNR_ada_sig_genes_prop_mdmp) != "",]
+
+write.csv(RvNR_ada_sig_genes_prop, file.path(adadmpDir, "RvNR_ada_DMP_prop.csv"))
+```
+
+```{r ada dmeg}
+#All DMEGs
+RvNR_ada_sig_gene_mdmp <- rownames(RvNR_ada_sig_genes_prop_mdmp)
+RvNR_ada_sig_gene_mdmp <- RvNR_ada_sig_gene_mdmp[-which(RvNR_ada_sig_gene_mdmp == "")]
+
+#Promoters only
+RvNR_ada_mdmppromDir <- file.path(RvNR_ada_mdmpDir, "promoters")
+dir.create(RvNR_ada_mdmppromDir)
+
+RvNR_ada_sig_gene_mdmp_p_gr <- makeGRangesFromDataFrame(do.call(rbind, lapply(RvNR_ada_sig_gene_mdmp, function(i) {
+  df <- RvNR_ada_sig[grep(i, RvNR_ada_sig$UCSC_RefGene_Name),]
+  if(nrow(df) == 0) return(NULL)
+  else{
+    df_min <- with(df, data.frame(seqnames = unique(seqnames),
+                                  start = min(start),
+                                  end = max(end),
+                                  gene = i))
+    
+    return(df_min)
+  }
+})), keep.extra.columns = T)
+
+for(i in 1:length(RvNR_ada_sig_gene_mdmp_p_gr)){
+  Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(RvNR_ada_mdmppromDir, paste0(RvNR_ada_sig_gene_mdmp_p_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_effect_plot(region_of_interest = RvNR_ada_sig_gene_mdmp_p_gr[i,], tophits = RvNR_ada_top_gr))
+  dev.off()
+}
+
+#Promoters and enhancers
+RvNR_ada_mdmpfullDir <- file.path(RvNR_ada_mdmpDir, "promoters_and_enhancers")
+dir.create(RvNR_ada_mdmpfullDir)
+
+RvNR_ada_sig_gene_mdmp_pe_gr <- makeGRangesFromDataFrame(do.call(rbind, lapply(RvNR_ada_sig_gene_mdmp, function(i) {
+  df <- RvNR_ada_sig[grep(i, paste0(RvNR_ada_sig$UCSC_RefGene_Name, ";", RvNR_ada_sig$enhancer_gene)),]
+  df_min <- with(df, data.frame(seqnames = unique(seqnames),
+                                start = min(start),
+                                end = max(end),
+                                gene = i))
+  
+  return(df_min)
+})), keep.extra.columns = T)
+
+for(i in 1:length(RvNR_ada_sig_gene_mdmp_pe_gr)){
+  Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(RvNR_ada_mdmpfullDir, paste0(RvNR_ada_sig_gene_mdmp_pe_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_effect_plot(region_of_interest = RvNR_ada_sig_gene_mdmp_pe_gr[i,], tophits = RvNR_ada_top_gr))
+  dev.off()
+}
+```
+
+```{r}
+cons_dmp <- function(gene, top_gr){
+  gene_dmps <- top_gr[grep(gene, paste0(top_gr$UCSC_RefGene_Name, ";", top_gr$enhancer_gene)),]
+  gene_dmps <- gene_dmps[order(gene_dmps),]
+  as.numeric(dist(which(gene_dmps$adj.P.Val < 0.05), method = "manhattan"))
+}
+cons_dmp("C20orf134", RvNR_ada_top_gr)
+
+gene_pw_dist <- lapply(RvNR_ada_sig_gene_mdmp, cons_dmp, top_gr = RvNR_ada_top_gr)
+names(gene_pw_dist) <- RvNR_ada_sig_gene_mdmp
+gene_pw_dist <- gene_pw_dist[order(names(gene_pw_dist))]
+```
+
+```{r ada RvNR visualization}
+adarvnrDir <- file.path(adadmpDir, "figures")
+dir.create(adarvnrDir)
+
+for(i in 1:nrow(RvNR_ada_sig)){
+  cpg_num <- rownames(RvNR_ada_top)[i]
+  
+  stitle <- paste0(RvNR_ada_top$seqnames[i], ":", RvNR_ada_top$start[i])
+  
+  if(!is.na(RvNR_ada_top$Probe_rs[i])){
+    stitle <- paste0(stitle, " pGV: ", RvNR_ada_top$Probe_rs[i], " (MAF:", RvNR_ada_top$Probe_maf[i], ")")
+  } else if(!is.na(RvNR_ada_top$CpG_rs[i])){
+    stitle <- paste0(stitle, " cGV: ", RvNR_ada_top$CpG_rs[i], " (MAF:", RvNR_ada_top$CpG_maf[i], ")")
+  } else if(!is.na(RvNR_ada_top$SBE_rs[i])){
+    stitle <- paste0(stitle, " cGV: ", RvNR_ada_top$SBE_rs[i], " (MAF:", RvNR_ada_top$SBE_maf[i], ")")
+  }
+  
+  Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(adarvnrDir, paste0(i, "_", cpg_num, ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_ada, 
+                              factor_interest = pData(gmset_ada_filtered)$resptime, 
+                              legend = F) + 
+          labs(subtitle = stitle))
+  dev.off()
+  
+  Cairo(width = 500, height = 500, type = "png", file = file.path(adarvnrDir, paste0(i, "_", cpg_num, ".png")), bg = "white", units = "px")
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_ada, 
+                              factor_interest = pData(gmset_ada_filtered)$resptime, 
+                              legend = F) +
+          labs(subtitle = stitle))
+  dev.off()
+}
+```
+
+```{r ada dmrs}
+adadmrDir <- file.path(dmrDir, "adalimumab")
+dir.create(adadmrDir)
+
+require(DMRcate)
+
+set.seed(123712)
+RvNR_dmr_ada_anno <- cpg.annotate(object = mvals_ada,
+                                   datatype = "array",
+                                   arraytype = "EPIC",
+                                   what = "M",
+                                   analysis.type = "differential",
+                                   design = design_ada,
+                                   contrasts = T,
+                                   cont.matrix = contrast_mat_ada,
+                                   coef = "RvNR")
+RvNR_dmr_ada <- dmrcate(RvNR_dmr_ada_anno, lambda = 1000, C = 2, min.cpgs = 3, mc.cores = 8, pcutoff = 0.05)
+RvNR_dmr_ada_gr <- extractRanges(RvNR_dmr_ada, genome = "hg19")
+
+RvNR_dmr_ada_gr <- annotatePeakInBatch(myPeakList = RvNR_dmr_ada_gr, 
+                                       AnnotationData = unlist(reduce(transcriptsBy(x = TxDb.Hsapiens.UCSC.hg19.knownGene, by = "gene"))), 
+                                       output="nearestBiDirectionalPromoters",
+                                       bindingRegion=c(-5000, 1000))
+names(RvNR_dmr_ada_gr) <- 1:length(RvNR_dmr_ada_gr)
+RvNR_dmr_ada_gr$Gene <- mapIds(x = org.Hs.eg.db, 
+                               keys = RvNR_dmr_ada_gr$feature, 
+                               column="SYMBOL", 
+                               keytype="ENTREZID", 
+                               multiVals="first")
+write.csv(as.data.frame(RvNR_dmr_ada_gr), file.path(adadmrDir, "RvNR_ada.csv"))
+
+adadmrplot1 <- dmr_plot(dmr_gr = RvNR_dmr_ada_gr[1], meth_data = betas_ada, anno_gr = gmset_ada_anno_gr, meth_groups = pData(gmset_ada_filtered)$Response) + ggtitle("GSTM5")
+adadmrplot2 <- dmr_plot(dmr_gr = RvNR_dmr_ada_gr[2], meth_data = betas_ada, anno_gr = gmset_ada_anno_gr, meth_groups = pData(gmset_ada_filtered)$Response) + ggtitle("(No annotated gene)")
+adadmrplot3 <- dmr_plot(dmr_gr = RvNR_dmr_ada_gr[3], meth_data = betas_ada, anno_gr = gmset_ada_anno_gr, meth_groups = pData(gmset_ada_filtered)$Response) + ggtitle("(No annotated gene)")
+```
+
+```{r ada gaphunting}
+adagvDir <- file.path(adadmpDir, "genetic_variants")
+dir.create(adagvDir)
+
+require(SNPlocs.Hsapiens.dbSNP151.GRCh38)
+require(liftOver)
+require(rsnps)
+ada_gh <- gaphunter(object = gmset_ada_filtered)
+
+RvNR_ada_sig_cpgs_gh <- intersect(rownames(ada_gh$proberesults), rownames(RvNR_ada_sig))
+RvNR_ada_sig_cpgs_gh <- ada_gh$proberesults[RvNR_ada_sig_cpgs_gh,]
+
+RvNR_ada_sig_cpgs_gh_anno_gr <- makeGRangesFromDataFrame(gmset_ada_anno[rownames(RvNR_ada_sig_cpgs_gh),], keep.extra.columns = F, start.field = "pos", end.field = "pos")
+
+hg19tohg38 <- import.chain("/home/ayliyim/archive/common_data/liftover_chains/hg19ToHg38.over.chain")
+
+RvNR_ada_sig_cpgs_gh_anno_hg38_gr <- unlist(liftOver(RvNR_ada_sig_cpgs_gh_anno_gr, hg19tohg38))
+#RvNR_ada_sig_cpgs_gh_anno_hg38_gr <- split(RvNR_ada_sig_cpgs_gh_anno_hg38_gr, seqnames(RvNR_ada_sig_cpgs_gh_anno_hg38_gr))
+RvNR_ada_sig_cpgs_gh_anno_hg38_gr <- RvNR_ada_sig_cpgs_gh_anno_hg38_gr+50
+seqlevelsStyle(RvNR_ada_sig_cpgs_gh_anno_hg38_gr) <- seqlevelsStyle(SNPlocs.Hsapiens.dbSNP151.GRCh38)
+
+RvNR_ada_sig_cpgs_gh_snps <- snpsByOverlaps(x = SNPlocs.Hsapiens.dbSNP151.GRCh38, ranges = RvNR_ada_sig_cpgs_gh_anno_hg38_gr)
+saveRDS(RvNR_ada_sig_cpgs_gh_snps, file.path(adagvDir, "RvNR_ada_sig_GVs.Rds"))
+
+#MAF
+require(biomaRt)
+enssnp_mart <- useDataset("hsapiens_snp", mart = "ENSEMBL_MART_SNP")
+RvNR_ada_sig_cpgs_gh_snps_df <- getBM(attributes = c("refsnp_id", "allele", "minor_allele_freq"), filters = "snp_filter", values = RvNR_ada_sig_cpgs_gh_snps$RefSNP_id, mart = enssnp_mart)
+RvNR_ada_sig_cpgs_gh_snps_df <- RvNR_ada_sig_cpgs_gh_snps_df[!is.na(RvNR_ada_sig_cpgs_gh_snps_df$minor_allele_freq),]
+
+RvNR_ada_sig_cpgs_gh_snps <- makeGRangesFromDataFrame(merge(data.frame(RvNR_ada_sig_cpgs_gh_snps), RvNR_ada_sig_cpgs_gh_snps_df, by.x = "RefSNP_id", by.y = "refsnp_id"), keep.extra.columns = T, start.field = "pos", end.field = "pos")
+
+RvNR_ada_sig_cpgs_gh_snps_pcgv_ol <- findOverlaps(RvNR_ada_sig_cpgs_gh_snps, RvNR_ada_sig_cpgs_gh_anno_hg38_gr)
+
+RvNR_ada_sig_cpgs_gh_snps_ol <- RvNR_ada_sig_cpgs_gh_snps[queryHits(RvNR_ada_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_ada_sig_cpgs_gh_snps_ol$CpG <- names(RvNR_ada_sig_cpgs_gh_anno_hg38_gr)[subjectHits(RvNR_ada_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_ada_sig_cpgs_gh_snps_ol$CpG_pos <- start(RvNR_ada_sig_cpgs_gh_anno_hg38_gr-50)[subjectHits(RvNR_ada_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_ada_sig_cpgs_gh_snps_ol$GV_relpos <- RvNR_ada_sig_cpgs_gh_snps_ol$CpG_pos-start(RvNR_ada_sig_cpgs_gh_snps_ol)
+RvNR_ada_sig_cpgs_gh_snps_ol$GV_type <- "probe GV"
+RvNR_ada_sig_cpgs_gh_snps_ol$GV_type[RvNR_ada_sig_cpgs_gh_snps_ol$GV_relpos == 0] <- "CpG GV"
+RvNR_ada_sig_cpgs_gh_snps_ol$Gene <- RvNR_ada_sig$UCSC_RefGene_Name[match(RvNR_ada_sig_cpgs_gh_snps_ol$CpG, RvNR_ada_sig$Name)]
+RvNR_ada_sig_cpgs_gh_snps_ol$Beta <- RvNR_ada_sig$P.Value[match(RvNR_ada_sig_cpgs_gh_snps_ol$CpG, RvNR_ada_sig$Name)]
+RvNR_ada_sig_cpgs_gh_snps_ol$Pvalue <- RvNR_ada_sig$Beta[match(RvNR_ada_sig_cpgs_gh_snps_ol$CpG, RvNR_ada_sig$Name)]
+RvNR_ada_sig_cpgs_gh_snps_df <- data.frame(RvNR_ada_sig_cpgs_gh_snps_ol)
+RvNR_ada_sig_cpgs_gh_snps_df <- RvNR_ada_sig_cpgs_gh_snps_df[, c("CpG", "seqnames", "CpG_pos", "Beta", "Pvalue", "RefSNP_id", "start", "GV_relpos", "allele", "GV_type", "minor_allele_freq", "Gene")]
+colnames(RvNR_ada_sig_cpgs_gh_snps_df) <- c("CpG", "Chromosome", "CpG_position", "Beta", "Pvalue", "RSID", "GV_position", "GV_CpG_relpos", "Alleles", "GV_type", "MAF_all_1000g", "Gene")
+
+write.csv(RvNR_ada_sig_cpgs_gh_snps_df, file = file.path(adagvDir, "RvNR_ada_sig_GVs.csv"))
+
+#up
+RvNR_ada_sig_cl_plot <- data.frame(Type = c("non-clustered", "clustered"),
+           DMPs = c(nrow(RvNR_ada_sig)-nrow(RvNR_ada_sig_cpgs_gh), nrow(RvNR_ada_sig_cpgs_gh)),
+           Group = "DMPs") %>%
+  ggplot(aes(x = Group, y = DMPs, fill = Type)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = DMPs), position = position_stack(vjust = 0.5)) +
+  scale_fill_viridis(discrete = T) +
+  coord_flip() +
+  ggtitle("DMPs with catalogued GVs") +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+#left
+RvNR_ada_sig_typegv_df <- data.frame(table(RvNR_ada_sig_cpgs_gh_snps_df$GV_type))
+RvNR_ada_sig_typegv_df$Location <- gsub(" GV", "", RvNR_ada_sig_typegv_df$Location)
+colnames(RvNR_ada_sig_typegv_df) <- c("Location", "GVs")
+
+RvNR_ada_sig_typegv_plot <- ggplot(RvNR_ada_sig_typegv_df, aes(x = Location, y = GVs)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = GVs), position = position_stack(vjust = 0.5)) +
+  ggtitle("Location of GVs") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+RvNR_ada_gc_plot_tr <- ggarrange(RvNR_ada_sig_cl_plot, RvNR_ada_sig_typegv_plot, nrow = 2, align = "v", heights = c(0.5, 1))
+
+#right
+RvNR_ada_sig_cpgs_gv_plot <- data.frame(RvNR_ada_sig_cpgs_gh_snps_ol) %>%
+  ggplot(aes(x = GV_relpos, y = minor_allele_freq, col = minor_allele_freq, alpha = -log(abs(GV_relpos+0.001)))) +
+  #geom_line(aes(group = CpG)) +
+  geom_point() +
+  geom_rect(data = data.frame(x0 = -1.5, x1 = 1.5),
+            inherit.aes = FALSE,
+            aes(xmin = x0, xmax = x1, ymin = -Inf, ymax = Inf), alpha = 0.15) +
+  #facet_wrap(~CpG, ncol = 12) +
+  xlab("Position relative to CpG of interest") +
+  ylab("MAF") +
+  theme_bw() +
+  theme(legend.pos = "none", 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+RvNR_ada_gc_plot <- ggarrange(RvNR_ada_gc_plot_tr, RvNR_ada_sig_cpgs_gv_plot, ncol = 2, widths = c(0.5, 1))
+
+Cairo(width = 2500, height = 1250, type = "pdf", file = file.path(adagvDir, "RvNR_ada_sig_GVs.pdf"), bg = "white", units = "px", dpi = 120)
+#Cairo(width = 10000, height = 3000, type = "pdf", file = file.path(adagvDir, "RvNR_ada_sig_GVs.pdf"), bg = "white", units = "px", dpi = 120)
+print(RvNR_ada_gc_plot)
+dev.off()
+```
+
+```{r ada gvs dmps}
+require(proxysnps)
+adagvsDir <- file.path(adagvDir, "ld_gvs")
+dir.create(adagvsDir)
+
+RvNR_ada_sig_cpgs_gh_snps_df_ld <- lapply(RvNR_ada_sig_cpgs_gh_snps_df$RSID, FUN = function(RSID){
+  get_proxies(query = RSID)
+})
+RvNR_ada_sig_cpgs_gh_snps_df_ld <- do.call(rbind, RvNR_ada_sig_cpgs_gh_snps_df_ld)
+
+#GV overlap
+gv_pubsum <- pubsum[grep("^rs.+$", pubsum$ID),]
+intersect(rs_ld_ada$ld_rsid, gv_pubsum$ID)
+
+#Gene overlap
+table(gv_pubsum$gene %in% RvNR_ada_sig_genes)
+```
+
+```{r ada response dmps across time}
+RvNR_ada_resp_time_df <- data.frame(CpG = rownames(RvNR_ada_sig),
+                                    RvNR_beta = RvNR_ada_sig$Beta,
+                                    RvNR_pval = RvNR_ada_sig$P.Value,
+                                    RvNR_padj = RvNR_ada_sig$adj.P.Val,
+                                    T2vT1_betas = T2vT1_ada_top[rownames(RvNR_ada_sig),"Beta"],
+                                    T2vT1_pval = T2vT1_ada_top[rownames(RvNR_ada_sig),"P.Value"],
+                                    T2vT1_padj = T2vT1_ada_top[rownames(RvNR_ada_sig),"adj.P.Val"])
+RvNR_ada_resp_time_df$label <- c("Top", rep("Not", nrow(RvNR_ada_resp_time_df)-1))
+```
+
+```{r save ada gmset}
+saveRDS(gmset_ada_filtered, file.path(outputDir, "gmset_ada_filtered.Rds"))
+```
+
+#Infliximab
+
+```{r ifx preprocessing}
+gmset_ifx <- preprocessFunnorm(rgSet = rgset_ifx)
+# gmset_ifx <- gmset_ifx[with(getSnpInfo(gmset_ifx), which(CpG_maf < 0.01 | is.na(CpG_maf))),]
+# gmset_ifx <- gmset_ifx[with(getSnpInfo(gmset_ifx), which(SBE_maf < 0.01 | is.na(SBE_maf))),]
+gmset_ifx_nosex <- gmset_ifx[-which(minfi::getAnnotation(gmset_ifx)$chr %in% c("chrX", "chrY")),]
+
+gmset_ifx_filtered <- gmset_ifx_nosex[!names(gmset_ifx_nosex) %in% pmprobes,]
+saveRDS(gmset_ifx_filtered, file.path(outputDir, "gmset_ifx_filtered.Rds"))
+
+betas_ifx <- getBeta(gmset_ifx_filtered)
+mvals_ifx <- getM(gmset_ifx_filtered)
+
+mvals_ifx <- mvals_ifx[-which(mvals_ifx == -Inf, arr.ind = T)[,1],]
+```
+
+```{r ifx annotated and predicted sex}
+require(ggplot2)
+require(dplyr)
+require(ggrepel)
+
+pData(gmset_ifx) %>% 
+  data.frame %>% 
+  select(Sample_ID, Sex, predictedSex, xMed, yMed) %>%
+  mutate(Sample_label = ifelse(Sex == predictedSex, "", Sample_ID)) %>% 
+  ggplot(aes(x = xMed, y = yMed, col = Sex, label = Sample_label)) +
+  geom_text_repel(show.legend = F) +
+  geom_point(size = 4) +
+  theme_bw() +
+  ggtitle("Sex chromosome probe median intensities") +
+  xlab("chrX") +
+  ylab("chrY") +
+  theme(text = element_text(size = 12))
+```
+
+Two samples in particular appear to be annotated incorrectly. Unlike vedolizumab, it does not appear as though a sample switch has occurred (based on sex).
+
+```{r ifx sex discrepancies}
+pData(gmset_ifx)[which(pData(gmset_ifx)$Sex != pData(gmset_ifx)$predictedSex),]
+```
+
+The two samples in question pertain the samples from donor F029. As no sex-mismatches appear to be visible among the correctly labeled females, I suspect that the F029 samples simply have been annotated incorrectly as female whereas they are actually a male.
+
+```{r ifx mislabeled samples}
+F029_samples <- grep("F029", samplesheet$Donor_ID)
+
+samplesheet[F029_samples, "Sex"] <- "M"
+
+write.csv(samplesheet, file.path(samplesDir, "samplesheet_PRJ0000008_CDMEDRESP_fixed.csv"))
+```
+
+Having edited the values, we need to re-import the samples again. 
+
+```{r ifx re-import data}
+samplesheet <- read.metharray.sheet(base = samplesDir, pattern = "samplesheet_PRJ0000008_CDMEDRESP_fixed.csv")
+samplesheet$Basename <- samplesheet$Path
+
+samplesheet_vedo <- samplesheet[samplesheet$Drug == "Vedolizumab",]
+samplesheet_ada <- samplesheet[samplesheet$Drug == "Adalimumab",]
+samplesheet_ifx <- samplesheet[samplesheet$Drug == "Infliximab",]
+
+#prepare rgset
+rgset_ifx <- read.metharray.exp(targets = samplesheet_ifx)
+rgset <- read.metharray.exp(targets = samplesheet, force = T)
+```
+
+```{r ifx re-preprocessing}
+gmset_ifx <- preprocessFunnorm(rgSet = rgset_ifx)
+#gmset_ifx_processed <- gmset_ifx[with(getSnpInfo(gmset_ifx), which(CpG_maf < 0.01 | is.na(CpG_maf))),]
+#gmset_ifx_processed <- gmset_ifx[with(getSnpInfo(gmset_ifx), which(SBE_maf < 0.01 | is.na(SBE_maf))),]
+gmset_ifx_processed <- gmset_ifx[-which(minfi::getAnnotation(gmset_ifx)$chr %in% c("chrX", "chrY")),]
+
+gmset_ifx_filtered <- gmset_ifx_processed[!names(gmset_ifx_processed) %in% pmprobes,]
+
+betas_ifx <- getBeta(gmset_ifx_filtered)
+mvals_ifx <- getM(gmset_ifx_filtered)
+
+mvals_ifx <- mvals_ifx[-which(mvals_ifx == -Inf, arr.ind = T)[,1],]
+```
+
+We can now check whether the samples are correct.
+
+```{r ifx check samples}
+require(ggplot2)
+require(dplyr)
+require(ggrepel)
+
+pData(gmset_ifx_filtered) %>% 
+  data.frame %>% 
+  select(Sample_ID, Sex, predictedSex, xMed, yMed) %>%
+  mutate(Sample_label = ifelse(Sex == predictedSex, "", Sample_ID)) %>% 
+  ggplot(aes(x = xMed, y = yMed, col = Sex, label = Sample_label)) +
+  geom_text_repel(show.legend = F) +
+  geom_point(size = 4) +
+  theme_bw() +
+  ggtitle("Sex chromosome probe median intensities") +
+  xlab("chrX") +
+  ylab("chrY") +
+  theme(text = element_text(size=12),
+        legend.position = "bottom")
+```
+
+```{r ifx sample-sample correlation}
+betas_ifx_cor <- cor(betas_ifx)
+
+require(pheatmap)
+pheatmap(betas_ifx_cor)
+```
+
+As observed for the previous drugs, the correlation is high (>0.975), which suggests that the methylation of all samples is reasonably similar. We expect that samples derived from the same patient would show the highest pairwise correlation, but given that the correlation is already so high, it would not be strange that this is not always the case.
+
+```{r ifx PCA}
+mvals_ifx_dm <- mvals_ifx - rowMeans(mvals_ifx)
+mvals_ifx_svd <- svd(t(mvals_ifx_dm))
+mvals_ifx_svd_expvar <- round(mvals_ifx_svd$d/sum(mvals_ifx_svd$d), 2)*100
+
+mvals_ifx_svd_df <- data.frame(Sample_ID = pData(gmset_ifx_filtered)$Sample_ID,
+                               Origin = pData(gmset_ifx_filtered)$Donor_ID,
+                               Timepoint = pData(gmset_ifx_filtered)$Timepoint,
+                               Response = pData(gmset_ifx_filtered)$Response,
+                               Sex = pData(gmset_ifx_filtered)$predictedSex,
+                               Age = pData(gmset_ifx_filtered)$Age,
+                               PC1 = mvals_ifx_svd$u[,1],
+                               PC2 = mvals_ifx_svd$u[,2])
+
+mvals_ifx_svd_plotobj <- ggplot(mvals_ifx_svd_df, aes(x = PC1, y = PC2, Label = Sample_ID, Origin = Origin, Timepoint = Timepoint, Response = Response, Sex = Sex, Age = Age)) +
+  geom_point(aes(col = Response, shape = Timepoint), size = 4) +
+  theme_bw() +
+  xlab(paste0("PC1 (", mvals_ifx_svd_expvar[1], "%)")) +
+  ylab(paste0("PC2 (", mvals_ifx_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+
+mvals_ifx_svd_corr <- data.frame(rbind(NDlib::svd_correlator(evs = mvals_ifx_svd$u, confounder = pData(gmset_ifx_filtered)$Sex)[[1]],
+                                NDlib::svd_correlator(evs = mvals_ifx_svd$u, confounder = pData(gmset_ifx_filtered)$Age)[[1]],
+                                NDlib::svd_correlator(evs = mvals_ifx_svd$u, confounder = pData(gmset_ifx_filtered)$Timepoint)[[1]],
+                                NDlib::svd_correlator(evs = mvals_ifx_svd$u, confounder = pData(gmset_ifx_filtered)$Response)[[1]]),
+                          variable = rep(c("Sex", "Age", "Timepoint", "Response"), each = ncol(mvals_ifx_svd$u)))
+
+mvals_ifx_svd_corr_plotobj <- ggplot(mvals_ifx_svd_corr, aes(x = PC, y = Correlation, fill = variable)) +
+  geom_hline(yintercept = 0) +
+  geom_point(shape = 21, size = 4) +
+  ylim(-0.1, 1) +
+  ylab(expression(R^2)) +
+  theme_bw() +
+  theme(text = element_text(size = 12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+```{r ifx DM analyses preparation}
+require(limma)
+
+design_ifx <- model.matrix(~0 + resptime + Sex + Age, data = pData(gmset_ifx_filtered))
+colnames(design_ifx) <- c("T1_NR", "T2_NR", "T1_R", "T2_R", "Male", "Age")
+mvals_lmfit_ifx <- lmFit(mvals_ifx, design = design_ifx)
+betas_lmfit_ifx <- lmFit(betas_ifx, design = design_ifx)
+
+contrast_mat_ifx <- makeContrasts(
+  RvNR = (T1_R+T2_R)/2-(T1_NR+T2_NR)/2,
+  T2vT1 = (T2_R+T2_NR)/2-(T1_R+T1_NR)/2,
+  T2RvT1R = T2_R-T1_R,
+  T2NRvT1NR = T2_NR-T1_NR,
+  TR = (T2_R-T1_R)-(T2_NR-T1_NR),
+  levels = design_ifx
+)
+
+mvals_contrastfit_ifx <- contrasts.fit(mvals_lmfit_ifx, contrast_mat_ifx)
+mvals_ebayes_ifx <- eBayes(mvals_contrastfit_ifx)
+
+betas_contrastfit_ifx <- contrasts.fit(betas_lmfit_ifx, contrast_mat_ifx)
+betas_ebayes_ifx <- eBayes(betas_contrastfit_ifx)
+```
+
+For the first analyses we will investigate whether we can find any differentially methylated positions (DMPs).
+
+```{r ifx dmp analysis, echo = F}
+ifxdmpDir <- file.path(dmpDir, "infliximab")
+dir.create(ifxdmpDir)
+
+gmset_ifx_anno <- minfi::getAnnotation(gmset_ifx_filtered)
+gmset_ifx_anno_gr <- makeGRangesFromDataFrame(gmset_ifx_anno, keep.extra.columns = T, seqnames.field = "chr", start.field = "pos", end.field = "pos")
+
+gmset_ifx_anno_enh_ol <- findOverlaps(query = gmset_ifx_anno_gr, subject = enhancers_gr)
+gmset_ifx_anno_enh_ol <- data.frame(gmset_ifx_anno_enh_ol, enh_gene = enhancers_gr[subjectHits(gmset_ifx_anno_enh_ol),]$SYMBOL)
+gmset_ifx_anno_enh_ol_list <- split(gmset_ifx_anno_enh_ol, gmset_ifx_anno_enh_ol$queryHits)
+gmset_ifx_anno_enh_genes <- do.call(rbind, lapply(gmset_ifx_anno_enh_ol_list, function(cpg){
+  paste(cpg$enh_gene, collapse = ";")
+}))
+
+gmset_ifx_anno_gr$enhancer_gene <- ""
+gmset_ifx_anno_gr$enhancer_gene[as.numeric(rownames(gmset_ifx_anno_enh_genes))] <- gmset_ifx_anno_enh_genes
+
+RvNR_ifx_top <- topTable(mvals_ebayes_ifx, coef = "RvNR", number = "Inf", adjust.method = "BH")
+RvNR_ifx_top <- cbind(RvNR_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(RvNR_ifx_top), "RvNR"], as.data.frame(gmset_ifx_anno_gr[rownames(RvNR_ifx_top), ]))
+RvNR_ifx_top_gr <- makeGRangesFromDataFrame(RvNR_ifx_top, keep.extra.columns = T)
+
+T2vT1_ifx_top <- topTable(mvals_ebayes_ifx, coef = "T2vT1", number = "Inf", adjust.method = "BH")
+T2vT1_ifx_top <- cbind(T2vT1_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(T2vT1_ifx_top), "T2vT1"], as.data.frame(gmset_ifx_anno_gr[rownames(T2vT1_ifx_top), ]))
+T2RvT1R_ifx_top <- topTable(mvals_ebayes_ifx, coef = "T2RvT1R", number = "Inf", adjust.method = "BH")
+T2RvT1R_ifx_top <- cbind(T2RvT1R_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(T2RvT1R_ifx_top), "T2RvT1R"], as.data.frame(gmset_ifx_anno_gr[rownames(T2RvT1R_ifx_top), ]))
+T2NRvT1NR_ifx_top <- topTable(mvals_ebayes_ifx, coef = "T2NRvT1NR", number = "Inf", adjust.method = "BH")
+T2NRvT1NR_ifx_top <- cbind(T2NRvT1NR_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(T2NRvT1NR_ifx_top), "T2NRvT1NR"], as.data.frame(gmset_ifx_anno_gr[rownames(T2NRvT1NR_ifx_top), ]))
+TR_ifx_top <- topTable(mvals_ebayes_ifx, coef = "TR", number = "Inf", adjust.method = "BH")
+TR_ifx_top <- cbind(TR_ifx_top, Beta = coefficients(betas_ebayes_ifx)[rownames(TR_ifx_top), "TR"], as.data.frame(gmset_ifx_anno_gr[rownames(TR_ifx_top), ]))
+
+write.csv(RvNR_ifx_top, file.path(ifxdmpDir, "RvNR_ifx.csv"))
+write.csv(T2vT1_ifx_top, file.path(ifxdmpDir, "T2vT1_ifx.csv"))
+write.csv(T2RvT1R_ifx_top, file.path(ifxdmpDir, "T2RvT1R_ifx.csv"))
+write.csv(T2NRvT1NR_ifx_top, file.path(ifxdmpDir, "T2NRvT1NR_ifx.csv"))
+write.csv(TR_ifx_top, file.path(ifxdmpDir, "TR_ifx.csv"))
+
+Cairo(width = 1000, height = 1000, type = "png", file = file.path(ifxdmpDir, "volcano_ifx_RvNR.png"), bg = "white", units = "px", dpi = 120)
+print(with(RvNR_ifx_top, volcano_plot(effect_sizes = Beta, 
+                                      pvals = P.Value, 
+                                      int_effect_threshold = 0.1, 
+                                      significance = adj.P.Val < 0.05, 
+                                      identifiers = rownames(RvNR_ifx_top), 
+                                      title = "Infliximab: Responders vs non-responders")))
+dev.off()
+```
+
+Again, only the responders vs non-responders comparison appears to have yielded interesting results. 
+
+```{r ifx dmps sig}
+RvNR_ifx_sig <- RvNR_ifx_top[RvNR_ifx_top$adj.P.Val < 0.05,]
+write.csv(RvNR_ifx_sig, file.path(ifxdmpDir, "RvNR_ifx_sig.csv"))
+
+RvNR_ifx_hm_anno_col <- data.frame(row.names = rownames(pData(gmset_ifx_filtered)),
+                                   Response = pData(gmset_ifx_filtered)$Response,
+                                   Donor = pData(gmset_ifx_filtered)$Donor_ID,
+                                   Timepoint = pData(gmset_ifx_filtered)$Timepoint)
+
+RvNR_ifx_hm_anno_row <- data.frame(row.names = rownames(RvNR_ifx_sig),
+                                   pGV_MAF = RvNR_ifx_sig$Probe_maf,
+                                   cGV_MAF = RvNR_ifx_sig$CpG_maf)
+
+RvNR_ifx_hm <- grid.grabExpr(pheatmap(mat = betas_ifx[rownames(RvNR_ifx_sig[1:75,]),],
+                                      annotation_col = RvNR_ifx_hm_anno_col,
+                                      annotation_row = RvNR_ifx_hm_anno_row,
+                                      breaks = breaksList, 
+                                      show_colnames = F))
+
+Cairo(width = 1000, height = 2500, type = "png", file = file.path(ifxdmpDir, "heatmap_ifx_RvNR_sig.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(RvNR_ifx_hm)
+dev.off()
+```
+
+The most prominent DMP (that is not a SNP according to Illumina) was found for cg11261447, which was found within the body of NLRP1. With a beta of ~0.60, this difference displays a stark difference between responders and non-responders. Due to this difference, one might quickly jump to the conclusion it is actually a SNP. However, no SNP was observed at this location using UCSC. 
+
+```{r ifx cg11261447 surrounding CpGs}
+gmset_ifx_anno_gr[(which(names(gmset_ifx_anno_gr) == "cg11261447")-2):(which(names(gmset_ifx_anno_gr) == "cg11261447")+2),]
+```
+
+Surprisingly, there nearest EPIC probes are 2000 bps further, which makes it hard to investigate the methylation status of the surrounding region. A wise followup experiment would therefore be a bisulfite sequencing experiment on this region in particular to validate the results technically, but also to investigate whether the surrounding CpGs are differentially methylated
+
+```{r ifx cg11261447 region plot}
+print(dmr_plot(dmr_gr = makeGRangesFromDataFrame(df = RvNR_ifx_top[3,], seqnames.field = "seqnames", start.field = "start", end.field = "start"),
+               flanks = 3000,
+               meth_data = betas_ifx, 
+               anno_gr = gmset_ifx_anno_gr, 
+               meth_groups = pData(gmset_ifx_filtered)$Response, 
+               title = "cg11261447 3000bps"))
+```
+
+We observe that 2000 bps downstream the methylation levels are the same, so likely the effect would be localized. Cross-referencing our data with UCSC, suggests that CTCF and DNase I HS sites are located at this particular CpG suggesting regulatory functionality. In an articly by Maurano et al. 2015 the authors suggest that while DNA methylation affects CTCF occupancy in some cases.
+The role of NLRP1 in infliximab has been alluded to before in the Dubinsky et al. 2010. The strange thing is that they state that rs302827 (chr19:56410222[C/T]) is associated to NLRP13, NLRP8, and NLRP1. While NLRP13 and NLRP8 are located on chr19, NLRP1 is located on chr17. Nonetheless, perhaps NLRP proteins in general are associated with inflammatory diseases and the response towards medication. NLRP stands for Nodd-like receptor.
+
+```{r ifx sig enrichment}
+require(missMethyl)
+
+RvNR_ifx_dmp_enrichment <- gometh(rownames(RvNR_ifx_sig), all.cpg = rownames(gmset_ifx_anno), collection = "KEGG", array.type = "EPIC", plot.bias = FALSE, prior.prob = TRUE)
+RvNR_ifx_dmp_enrichment <- RvNR_ifx_dmp_enrichment[order(RvNR_ifx_dmp_enrichment$P.DE),]
+write.csv(RvNR_ifx_dmp_enrichment, file.path(ifxdmpDir, "ifx_dmp_enrichment.csv"))
+```
+
+```{r ifx gaphunting}
+ifxgvDir <- file.path(ifxdmpDir, "genetic_variants")
+dir.create(ifxgvDir)
+
+require(SNPlocs.Hsapiens.dbSNP151.GRCh38)
+require(liftOver)
+require(rsnps)
+ifx_gh <- gaphunter(object = gmset_ifx_filtered)
+
+RvNR_ifx_sig_cpgs_gh <- intersect(rownames(ifx_gh$proberesults), rownames(RvNR_ifx_sig))
+RvNR_ifx_sig_cpgs_gh <- ifx_gh$proberesults[RvNR_ifx_sig_cpgs_gh,]
+
+RvNR_ifx_sig_cpgs_gh_anno_gr <- makeGRangesFromDataFrame(gmset_ifx_anno[rownames(RvNR_ifx_sig_cpgs_gh),], keep.extra.columns = F, start.field = "pos", end.field = "pos")
+
+hg19tohg38 <- import.chain("/home/ayliyim/archive/common_data/liftover_chains/hg19ToHg38.over.chain")
+
+RvNR_ifx_sig_cpgs_gh_anno_hg38_gr <- unlist(liftOver(RvNR_ifx_sig_cpgs_gh_anno_gr, hg19tohg38))
+#RvNR_ifx_sig_cpgs_gh_anno_hg38_gr <- split(RvNR_ifx_sig_cpgs_gh_anno_hg38_gr, seqnames(RvNR_ifx_sig_cpgs_gh_anno_hg38_gr))
+RvNR_ifx_sig_cpgs_gh_anno_hg38_gr <- RvNR_ifx_sig_cpgs_gh_anno_hg38_gr+50
+seqlevelsStyle(RvNR_ifx_sig_cpgs_gh_anno_hg38_gr) <- seqlevelsStyle(SNPlocs.Hsapiens.dbSNP151.GRCh38)
+
+RvNR_ifx_sig_cpgs_gh_snps <- snpsByOverlaps(x = SNPlocs.Hsapiens.dbSNP151.GRCh38, ranges = RvNR_ifx_sig_cpgs_gh_anno_hg38_gr)
+saveRDS(RvNR_ifx_sig_cpgs_gh_snps, file.path(ifxgvDir, "RvNR_ifx_sig_GVs.Rds"))
+
+#MAF
+require(biomaRt)
+enssnp_mart <- useDataset("hsapiens_snp", mart = "ENSEMBL_MART_SNP")
+RvNR_ifx_sig_cpgs_gh_snps_df <- getBM(attributes = c("refsnp_id", "allele", "minor_allele_freq"), filters = "snp_filter", values = RvNR_ifx_sig_cpgs_gh_snps$RefSNP_id, mart = enssnp_mart)
+RvNR_ifx_sig_cpgs_gh_snps_df <- RvNR_ifx_sig_cpgs_gh_snps_df[!is.na(RvNR_ifx_sig_cpgs_gh_snps_df$minor_allele_freq),]
+
+RvNR_ifx_sig_cpgs_gh_snps <- makeGRangesFromDataFrame(merge(data.frame(RvNR_ifx_sig_cpgs_gh_snps), RvNR_ifx_sig_cpgs_gh_snps_df, by.x = "RefSNP_id", by.y = "refsnp_id"), keep.extra.columns = T, start.field = "pos", end.field = "pos")
+
+RvNR_ifx_sig_cpgs_gh_snps_pcgv_ol <- findOverlaps(RvNR_ifx_sig_cpgs_gh_snps, RvNR_ifx_sig_cpgs_gh_anno_hg38_gr)
+
+RvNR_ifx_sig_cpgs_gh_snps_ol <- RvNR_ifx_sig_cpgs_gh_snps[queryHits(RvNR_ifx_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_ifx_sig_cpgs_gh_snps_ol$CpG <- names(RvNR_ifx_sig_cpgs_gh_anno_hg38_gr)[subjectHits(RvNR_ifx_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_ifx_sig_cpgs_gh_snps_ol$CpG_pos <- start(RvNR_ifx_sig_cpgs_gh_anno_hg38_gr-50)[subjectHits(RvNR_ifx_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_ifx_sig_cpgs_gh_snps_ol$GV_relpos <- RvNR_ifx_sig_cpgs_gh_snps_ol$CpG_pos-start(RvNR_ifx_sig_cpgs_gh_snps_ol)
+RvNR_ifx_sig_cpgs_gh_snps_ol$GV_type <- "probe GV"
+RvNR_ifx_sig_cpgs_gh_snps_ol$GV_type[RvNR_ifx_sig_cpgs_gh_snps_ol$GV_relpos == 0] <- "CpG GV"
+RvNR_ifx_sig_cpgs_gh_snps_ol$Gene <- RvNR_ifx_sig$UCSC_RefGene_Name[match(RvNR_ifx_sig_cpgs_gh_snps_ol$CpG, RvNR_ifx_sig$Name)]
+RvNR_ifx_sig_cpgs_gh_snps_ol$Beta <- RvNR_ifx_sig$P.Value[match(RvNR_ifx_sig_cpgs_gh_snps_ol$CpG, RvNR_ifx_sig$Name)]
+RvNR_ifx_sig_cpgs_gh_snps_ol$Pvalue <- RvNR_ifx_sig$Beta[match(RvNR_ifx_sig_cpgs_gh_snps_ol$CpG, RvNR_ifx_sig$Name)]
+RvNR_ifx_sig_cpgs_gh_snps_df <- data.frame(RvNR_ifx_sig_cpgs_gh_snps_ol)
+RvNR_ifx_sig_cpgs_gh_snps_df <- RvNR_ifx_sig_cpgs_gh_snps_df[, c("CpG", "seqnames", "CpG_pos", "Beta", "Pvalue", "RefSNP_id", "start", "GV_relpos", "allele", "GV_type", "minor_allele_freq", "Gene")]
+colnames(RvNR_ifx_sig_cpgs_gh_snps_df) <- c("CpG", "Chromosome", "CpG_position", "Beta", "Pvalue", "RSID", "GV_position", "GV_CpG_relpos", "Alleles", "GV_type", "MAF_all_1000g", "Gene")
+
+write.csv(RvNR_ifx_sig_cpgs_gh_snps_df, file = file.path(ifxgvDir, "RvNR_ifx_sig_GVs.csv"))
+
+#up
+RvNR_ifx_sig_cl_plot <- data.frame(Type = c("non-clustered", "clustered"),
+           DMPs = c(nrow(RvNR_ifx_sig)-nrow(RvNR_ifx_sig_cpgs_gh), nrow(RvNR_ifx_sig_cpgs_gh)),
+           Group = "DMPs") %>%
+  ggplot(aes(x = Group, y = DMPs, fill = Type)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = DMPs), position = position_stack(vjust = 0.5)) +
+  scale_fill_viridis(discrete = T) +
+  coord_flip() +
+  ggtitle("DMPs with catalogued GVs") +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+#left
+RvNR_ifx_sig_typegv_df <- data.frame(table(RvNR_ifx_sig_cpgs_gh_snps_df$GV_type))
+RvNR_ifx_sig_typegv_df$Location <- gsub(" GV", "", RvNR_ifx_sig_typegv_df$Location)
+colnames(RvNR_ifx_sig_typegv_df) <- c("Location", "GVs")
+
+RvNR_ifx_sig_typegv_plot <- ggplot(RvNR_ifx_sig_typegv_df, aes(x = Location, y = GVs)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = GVs), position = position_stack(vjust = 0.5)) +
+  ggtitle("Location of GVs") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+RvNR_ifx_gc_plot_tr <- ggarrange(RvNR_ifx_sig_cl_plot, RvNR_ifx_sig_typegv_plot, nrow = 2, align = "v", heights = c(0.5, 1))
+
+#right
+RvNR_ifx_sig_cpgs_gv_plot <- data.frame(RvNR_ifx_sig_cpgs_gh_snps_ol) %>%
+  ggplot(aes(x = GV_relpos, y = minor_allele_freq, col = minor_allele_freq, alpha = -log(abs(GV_relpos+0.001)))) +
+  #geom_line(aes(group = CpG)) +
+  geom_point() +
+  geom_rect(data = data.frame(x0 = -1.5, x1 = 1.5),
+            inherit.aes = FALSE,
+            aes(xmin = x0, xmax = x1, ymin = -Inf, ymax = Inf), alpha = 0.15) +
+  #facet_wrap(~CpG, ncol = 12) +
+  xlab("Position relative to CpG of interest") +
+  ylab("MAF") +
+  theme_bw() +
+  theme(legend.pos = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+RvNR_ifx_gc_plot <- ggarrange(RvNR_ifx_gc_plot_tr, RvNR_ifx_sig_cpgs_gv_plot, ncol = 2, widths = c(0.5, 1))
+
+Cairo(width = 2500, height = 1250, type = "pdf", file = file.path(ifxgvDir, "RvNR_ifx_sig_GVs.pdf"), bg = "white", units = "px", dpi = 120)
+#Cairo(width = 10000, height = 3000, type = "pdf", file = file.path(ifxgvDir, "RvNR_ifx_sig_GVs.pdf"), bg = "white", units = "px", dpi = 120)
+print(RvNR_ifx_gc_plot)
+dev.off()
+```
+
+```{r ifx gvs dmps}
+ifxgvsDir <- file.path(ifxdmpDir, "ld_gvs")
+dir.create(ifxgvsDir)
+
+RvNR_ifx_tdmps <- RvNR_ifx_sig[is.na(RvNR_ifx_sig$CpG_maf) & is.na(RvNR_ifx_sig$Probe_maf),]
+RvNR_ifx_pgvs <- RvNR_ifx_sig[!is.na(RvNR_ifx_sig$Probe_maf),]
+RvNR_ifx_cgvs <- RvNR_ifx_sig[!is.na(RvNR_ifx_sig$CpG_maf),]
+
+ifx_beta_dist_df <- data.frame(Beta = c(RvNR_ifx_tdmps$Beta, RvNR_ifx_pgvs$Beta, RvNR_ifx_cgvs$Beta),
+                               DMP = c(rep("tDMP", nrow(RvNR_ifx_tdmps)), rep("pSNP", nrow(RvNR_ifx_pgvs)), rep("cSNP", nrow(RvNR_ifx_csnp))))
+
+beta_dist_ifx_plotobj <- ggplot(ifx_beta_dist_df, mapping = aes(x = DMP, y = Beta, col = DMP, shape = DMP)) +
+  geom_violin() +
+  geom_jitter() +
+  geom_hline(yintercept = 0, linetype="dashed", color = "grey") +
+  #coord_flip() +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 12),
+        axis.title.x = element_blank())
+
+#Save the rsids for rAggr LD expansion
+rs_ifx <- c(RvNR_ifx_pgvs$Probe_rs, RvNR_ifx_cgvs$CpG_rs)
+write.csv(rs_ifx, file.path(ifxgvsDir, "rs_ifx.csv"))
+
+gv_pubsum <- pubsum[grep("^rs.+$", pubsum$ID),]
+
+intersect(rs_ld_ifx$ld_rsid, gv_pubsum$ID)
+
+#Gene overlap
+table(gv_pubsum$gene %in% RvNR_ifx_sig_genes)
+```
+
+```{r ifx sig dmp KEGG overrepresentation}
+require(missMethyl)
+
+ifx_dmp_enrichment <- gometh(rownames(RvNR_ifx_sig), all.cpg = rownames(gmset_ifx_anno), collection = "KEGG", array.type = "EPIC", plot.bias = FALSE, prior.prob = TRUE)
+ifx_dmp_enrichment <- ifx_dmp_enrichment[order(ifx_dmp_enrichment$P.DE),]
+write.csv(ifx_dmp_enrichment, file.path(ifxdmpDir, "ifx_dmp_enrichment.csv"))
+```
+
+```{r ifx dmprom KEGG enrichment}
+require(ChIPpeakAnno)
+require(dplyr)
+require(fgsea)
+
+RvNR_gene_ifx_top_gr <- annotatePeakInBatch(myPeakList = makeGRangesFromDataFrame(RvNR_ifx_top, keep.extra.columns = T), 
+                                            AnnotationData = unlist(reduce(transcriptsBy(x = TxDb.Hsapiens.UCSC.hg19.knownGene, by = "gene"))), 
+                                            output="nearestBiDirectionalPromoters",
+                                            bindingRegion=c(-5000, 1000))
+
+RvNR_gene_ifx_top_agg <- RvNR_gene_ifx_top_gr %>% 
+  data.frame() %>%
+  group_by(feature) %>%
+  dplyr::summarize(MeanBeta = mean(Beta, na.rm=TRUE))
+
+RvNR_gene_ifx_top_bd <- RvNR_gene_ifx_top_agg$MeanBeta
+names(RvNR_gene_ifx_top_bd) <- RvNR_gene_ifx_top_agg$feature
+
+RvNR_gene_ifx_obj <- fgsea(pathways = kegg_hs, 
+                           stats = RvNR_gene_ifx_top_bd,
+                           minSize = 15,
+                           maxSize = 500,
+                           nperm = 10000)
+RvNR_gene_ifx_obj <- RvNR_gene_ifx_obj[order(RvNR_gene_ifx_obj$pval),]
+
+RvNR_gene_ifx_obj$ID <- gsub("^[A-Z0-9_]+_MM_(.+)_Ensembl$", "\\1", RvNR_gene_ifx_obj$pathway)
+kegg_RvNR_gene_ifx <- data.frame(RvNR_gene_ifx_obj)[-8]
+
+write.csv(kegg_RvNR_gene_ifx, file.path(ifxdmpDir, "kegg_RvNR_gene_ifx.csv"))
+```
+
+```{r ifx genes with multiple dmps}
+RvNR_ifx_mdmpDir <- file.path(ifxdmpDir, "gene_mdmps")
+dir.create(RvNR_ifx_mdmpDir)
+
+RvNR_ifx_sig_genes <- do.call(c, lapply(strsplit(x = paste0(RvNR_ifx_sig$UCSC_RefGene_Name, ";", RvNR_ifx_sig$enhancer_gene), ";"), unique))
+RvNR_ifx_sig_genes_freq <- sort(table(RvNR_ifx_sig_genes))
+RvNR_ifx_sig_genes_bg <- unlist(lapply(names(RvNR_ifx_sig_genes_freq), function(gene){length(grep(gene, paste0(gmset_ifx_anno_gr$UCSC_RefGene_Name, ";", gmset_ifx_anno_gr$enhancer_gene)))}))
+names(RvNR_ifx_sig_genes_bg) <- names(RvNR_ifx_sig_genes_freq)
+RvNR_ifx_sig_genes_prop <- data.frame(frequency = as.vector(RvNR_ifx_sig_genes_freq),
+                                       background = as.vector(RvNR_ifx_sig_genes_bg),
+                                       proportion = as.vector(RvNR_ifx_sig_genes_freq)/as.vector(RvNR_ifx_sig_genes_bg),
+                                       row.names = names(RvNR_ifx_sig_genes_freq))
+
+RvNR_ifx_sig_genes_prop_mdmp <- RvNR_ifx_sig_genes_prop[RvNR_ifx_sig_genes_prop$frequency>1,]
+RvNR_ifx_sig_genes_prop_mdmp <- RvNR_ifx_sig_genes_prop_mdmp[order(RvNR_ifx_sig_genes_prop_mdmp$proportion, decreasing = T),]
+RvNR_ifx_sig_genes_prop_mdmp <- RvNR_ifx_sig_genes_prop_mdmp[rownames(RvNR_ifx_sig_genes_prop_mdmp) != "",]
+
+write.csv(RvNR_ifx_sig_genes_prop, file.path(ifxdmpDir, "RvNR_ifx_DMP_prop.csv"))
+```
+
+```{r ifx dmeg}
+#All DMEGs
+RvNR_ifx_sig_gene_mdmp <- rownames(RvNR_ifx_sig_genes_prop_mdmp)
+RvNR_ifx_sig_gene_mdmp <- RvNR_ifx_sig_gene_mdmp[-which(RvNR_ifx_sig_gene_mdmp == "")]
+
+#Promoters only
+RvNR_ifx_mdmppromDir <- file.path(RvNR_ifx_mdmpDir, "promoters")
+dir.create(RvNR_ifx_mdmppromDir)
+
+RvNR_ifx_sig_gene_mdmp_p_gr <- makeGRangesFromDataFrame(do.call(rbind, lapply(RvNR_ifx_sig_gene_mdmp, function(i) {
+  df <- RvNR_ifx_sig[grep(i, RvNR_ifx_sig$UCSC_RefGene_Name),]
+  if(nrow(df) == 0) return(NULL)
+  else{
+    df_min <- with(df, data.frame(seqnames = unique(seqnames),
+                                  start = min(start),
+                                  end = max(end),
+                                  gene = i))
+    
+    return(df_min)
+  }
+})), keep.extra.columns = T)
+
+for(i in 1:length(RvNR_ifx_sig_gene_mdmp_p_gr)){
+  Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(RvNR_ifx_mdmppromDir, paste0(RvNR_ifx_sig_gene_mdmp_p_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_effect_plot(region_of_interest = RvNR_ifx_sig_gene_mdmp_p_gr[i,], tophits = RvNR_ifx_top_gr, ylim = c(-0.3, 0.3)))
+  dev.off()
+}
+
+#Promoters and enhancers
+RvNR_ifx_mdmpfullDir <- file.path(RvNR_ifx_mdmpDir, "promoters_and_enhancers")
+dir.create(RvNR_ifx_mdmpfullDir)
+
+RvNR_ifx_sig_gene_mdmp_pe_gr <- makeGRangesFromDataFrame(do.call(rbind, lapply(RvNR_ifx_sig_gene_mdmp, function(i) {
+  df <- RvNR_ifx_sig[grep(i, paste0(RvNR_ifx_sig$UCSC_RefGene_Name, ";", RvNR_ifx_sig$enhancer_gene)),]
+  df_min <- with(df, data.frame(seqnames = unique(seqnames),
+                                start = min(start),
+                                end = max(end),
+                                gene = i))
+  
+  return(df_min)
+})), keep.extra.columns = T)
+
+for(i in 1:length(RvNR_ifx_sig_gene_mdmp_pe_gr)){
+  Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(RvNR_ifx_mdmpfullDir, paste0(RvNR_ifx_sig_gene_mdmp_pe_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_effect_plot(region_of_interest = RvNR_ifx_sig_gene_mdmp_pe_gr[i,], tophits = RvNR_ifx_top_gr))
+  dev.off()
+}
+```
+
+```{r ifx RvNR visualization}
+ifxrvnrDir <- file.path(ifxdmpDir, "figures")
+dir.create(ifxrvnrDir)
+
+for(i in 1:nrow(RvNR_ifx_sig)){
+  cpg_num <- rownames(RvNR_ifx_top)[i]
+  
+  stitle <- paste0(RvNR_ifx_top$seqnames[i], ":", RvNR_ifx_top$start[i])
+  
+  if(!is.na(RvNR_ifx_top$Probe_rs[i])){
+    stitle <- paste0(stitle, " pGV: ", RvNR_ifx_top$Probe_rs[i], " (MAF:", RvNR_ifx_top$Probe_maf[i], ")")
+  } else if(!is.na(RvNR_ifx_top$CpG_rs[i])){
+    stitle <- paste0(stitle, " cGV: ", RvNR_ifx_top$CpG_rs[i], " (MAF:", RvNR_ifx_top$CpG_maf[i], ")")
+  } else if(!is.na(RvNR_ifx_top$SBE_rs[i])){
+    stitle <- paste0(stitle, " cGV: ", RvNR_ifx_top$SBE_rs[i], " (MAF:", RvNR_ifx_top$SBE_maf[i], ")")
+  }
+  
+  Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(ifxrvnrDir, paste0(i, "_", cpg_num, ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_ifx, 
+                              factor_interest = pData(gmset_ifx_filtered)$resptime, 
+                              legend = F) + 
+          labs(subtitle = stitle))
+  dev.off()
+  
+  Cairo(width = 500, height = 500, type = "png", file = file.path(ifxrvnrDir, paste0(i, "_", cpg_num, ".png")), bg = "white", units = "px")
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_ifx, 
+                              factor_interest = pData(gmset_ifx_filtered)$resptime, 
+                              legend = F) +
+          labs(subtitle = stitle))
+  dev.off()
+}
+```
+
+```{r ifx dmrs}
+ifxdmrDir <- file.path(dmrDir, "infliximab")
+dir.create(ifxdmrDir)
+
+require(DMRcate)
+require(ChIPpeakAnno)
+require(AnnotationDbi)
+require(org.Hs.eg.db)
+
+set.seed(7895341)
+RvNR_dmr_ifx_anno <- cpg.annotate(object = mvals_ifx,
+                                   datatype = "array",
+                                   arraytype = "EPIC",
+                                   what = "M",
+                                   analysis.type = "differential",
+                                   design = design_ifx,
+                                   contrasts = T,
+                                   cont.matrix = contrast_mat_ifx,
+                                   coef = "RvNR")
+RvNR_dmr_ifx <- dmrcate(RvNR_dmr_ifx_anno, lambda = 1000, C = 2, min.cpgs = 3, mc.cores = 8, pcutoff = 0.05)
+RvNR_dmr_ifx_gr <- extractRanges(RvNR_dmr_ifx, genome = "hg19")
+
+RvNR_dmr_ifx_gr <- annotatePeakInBatch(myPeakList = RvNR_dmr_ifx_gr, 
+                                       AnnotationData = unlist(reduce(transcriptsBy(x = TxDb.Hsapiens.UCSC.hg19.knownGene, by = "gene"))), 
+                                       output="nearestBiDirectionalPromoters",
+                                       bindingRegion=c(-5000, 1000))
+names(RvNR_dmr_ifx_gr) <- 1:length(RvNR_dmr_ifx_gr)
+RvNR_dmr_ifx_gr$Gene <- mapIds(x = org.Hs.eg.db, 
+                               keys = RvNR_dmr_ifx_gr$feature, 
+                               column="SYMBOL", 
+                               keytype="ENTREZID", 
+                               multiVals="first")
+write.csv(as.data.frame(RvNR_dmr_ifx_gr), file.path(ifxdmrDir, "RvNR_ifx.csv"))
+
+ifxdmrplot1 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[1], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[1])
+ifxdmrplot2 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[2], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[2])
+ifxdmrplot3 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[3], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[3])
+ifxdmrplot4 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[4], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[4])
+ifxdmrplot5 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[5], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[5])
+ifxdmrplot6 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[6], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[6])
+ifxdmrplot7 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[7], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[7])
+ifxdmrplot8 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[8], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[8])
+ifxdmrplot9 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[9], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[9])
+ifxdmrplot10 <- dmr_plot(dmr_gr = RvNR_dmr_ifx_gr[10], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response, title = RvNR_dmr_ifx_gr$Gene[10])
+```
+
+The DMRs do not appear to yield much more relevant hits than what we have found previously, in particular, chr19:23941207-23942137 was also found when investigating genes with multiple DMPs.
+
+```{r ifx vmrs}
+# RvNR_vmr_ifx_anno <- cpg.annotate(object = mvals_ifx,
+#                                   datatype = "array",
+#                                   arraytype = "EPIC",
+#                                   what = "M",
+#                                   analysis.type = "variability",
+#                                   design = design_ifx,
+#                                   contrasts = T,
+#                                   cont.matrix = contrast_mat_ifx,
+#                                   coef = "RvNR")
+# RvNR_vmr_ifx <- dmrcate(RvNR_vmr_ifx_anno, lambda = 1000, C = 2, min.cpgs = 3, mc.cores = 8, pcutoff = 0.05)
+# RvNR_vmr_ifx_gr <- extractRanges(RvNR_vmr_ifx, genome = "hg19")
+# 
+# dmr_plot(dmr_gr = RvNR_vmr_ifx_gr[1], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response)
+# dmr_plot(dmr_gr = RvNR_vmr_ifx_gr[2], meth_data = betas_ifx, anno_gr = gmset_ifx_anno_gr, meth_groups = pData(gmset_ifx_filtered)$Response)
+```
+
+```{r ifx response dmps across time}
+RvNR_ifx_resp_time_df <- data.frame(CpG = rownames(RvNR_ifx_sig),
+                                    RvNR_beta = RvNR_ifx_sig$Beta,
+                                    RvNR_pval = RvNR_ifx_sig$P.Value,
+                                    RvNR_padj = RvNR_ifx_sig$adj.P.Val,
+                                    T2vT1_betas = T2vT1_ifx_top[rownames(RvNR_ifx_sig),"Beta"],
+                                    T2vT1_pval = T2vT1_ifx_top[rownames(RvNR_ifx_sig),"P.Value"],
+                                    T2vT1_padj = T2vT1_ifx_top[rownames(RvNR_ifx_sig),"adj.P.Val"])
+RvNR_ifx_resp_time_df$label <- c("Top", rep("Not", nrow(RvNR_ifx_resp_time_df)-1))
+```
+
+#Integration
+
+Previously, we performed separate differential methylation analyses per drug. We observed that for all comparisons the responders were different from the non-responders, but no differences were observed across timepoints. The question is whether any overlap is observed for all the different drugs. If any overlap is to be found, we expect infliximab and adalimumab to display some overlap as both target TNF, whereas vedolizumab targets LPAM-1. To investigate the overlap, we will look at the p-values and compare them with one another across comparisons.
+
+##DMPs
+
+###Overlap
+
+```{r integrative cpgs}
+stat_cols <- c("Name", "Beta", "t", "P.Value", "adj.P.Val")
+
+vedo_ada_rvnr <- merge(RvNR_vedo_top[,stat_cols], RvNR_ada_top[,stat_cols], by = "Name", suffixes = c("_vedo", "_ada"))
+vedo_ada_ifx_rvnr <- data.frame(merge(vedo_ada_rvnr, RvNR_ifx_top[,stat_cols], by = "Name", suffixes = c("", "_ifx")))
+colnames(vedo_ada_ifx_rvnr) <- c("CpG", "beta_vedo", "t_vedo", "p_vedo", "padj_vedo", "beta_ada", "t_ada", "p_ada", "padj_ada", "beta_ifx", "t_ifx", "p_ifx", "padj_ifx")
+
+#ADA and VEDO
+vedo_ada_ifx_rvnr$vedo_ada_sig <- "NS"
+vedo_ada_ifx_rvnr$vedo_ada_sig[vedo_ada_ifx_rvnr$padj_ada <= 0.05 & vedo_ada_ifx_rvnr$padj_vedo <= 0.05] <- "ADA & VEDO"
+vedo_ada_ifx_rvnr$vedo_ada_sig[vedo_ada_ifx_rvnr$padj_ada > 0.05 & vedo_ada_ifx_rvnr$padj_vedo <= 0.05] <- "VEDO"
+vedo_ada_ifx_rvnr$vedo_ada_sig[vedo_ada_ifx_rvnr$padj_ada <= 0.05 & vedo_ada_ifx_rvnr$padj_vedo > 0.05] <- "ADA"
+vedo_ada_ifx_rvnr$vedo_ada_sig <- factor(vedo_ada_ifx_rvnr$vedo_ada_sig, levels = c("NS", "ADA", "ADA & VEDO", "VEDO", "VEDO & IFX", "IFX", "IFX & ADA"))
+
+#ADA and IFX
+vedo_ada_ifx_rvnr$ada_ifx_sig <- "NS"
+vedo_ada_ifx_rvnr$ada_ifx_sig[vedo_ada_ifx_rvnr$padj_ifx <= 0.05 & vedo_ada_ifx_rvnr$padj_ada <= 0.05] <- "IFX & ADA"
+vedo_ada_ifx_rvnr$ada_ifx_sig[vedo_ada_ifx_rvnr$padj_ifx > 0.05 & vedo_ada_ifx_rvnr$padj_ada <= 0.05] <- "ADA"
+vedo_ada_ifx_rvnr$ada_ifx_sig[vedo_ada_ifx_rvnr$padj_ifx <= 0.05 & vedo_ada_ifx_rvnr$padj_ada > 0.05] <- "IFX"
+vedo_ada_ifx_rvnr$ada_ifx_sig <- factor(vedo_ada_ifx_rvnr$ada_ifx_sig, levels = c("NS", "ADA", "ADA & VEDO", "VEDO", "VEDO & IFX", "IFX", "IFX & ADA"))
+
+#IFX and VEDO
+vedo_ada_ifx_rvnr$ifx_vedo_sig <- "NS"
+vedo_ada_ifx_rvnr$ifx_vedo_sig[vedo_ada_ifx_rvnr$padj_vedo <= 0.05 & vedo_ada_ifx_rvnr$padj_ifx <= 0.05] <- "VEDO & IFX"
+vedo_ada_ifx_rvnr$ifx_vedo_sig[vedo_ada_ifx_rvnr$padj_vedo > 0.05 & vedo_ada_ifx_rvnr$padj_ifx <= 0.05] <- "IFX"
+vedo_ada_ifx_rvnr$ifx_vedo_sig[vedo_ada_ifx_rvnr$padj_vedo <= 0.05 & vedo_ada_ifx_rvnr$padj_ifx > 0.05] <- "VEDO"
+vedo_ada_ifx_rvnr$ifx_vedo_sig <- factor(vedo_ada_ifx_rvnr$ifx_vedo_sig, levels = c("NS", "ADA", "ADA & VEDO", "VEDO", "VEDO & IFX", "IFX", "IFX & ADA"))
+
+#NS, ADA, ADA_VEDO, VEDO, VEDO_IFX, IFX, IFX_ADA 
+treatment_col <- c("#D3D3D3", gg_color_hue(6))
+names(treatment_col) <- c("NS", "ADA", "ADA & VEDO", "VEDO", "VEDO & IFX", "IFX", "IFX & ADA")
+
+vedovada <- ggplot(data.frame(vedo_ada_ifx_rvnr), aes(x = -log10(p_vedo), y = -log10(p_ada), col = vedo_ada_sig)) +
+  geom_point() +
+  xlim(0, 25) +
+  ylim(0, 25) +
+  xlab(expression(-log[10](pvalue[vedo]))) +
+  ylab(expression(-log[10](pvalue[ada]))) +
+  ggtitle("Vedolizumab & Adalimumab") +
+  scale_color_manual(values = treatment_col, name= "", drop = F) +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+
+adavifx <- ggplot(data.frame(vedo_ada_ifx_rvnr), aes(x = -log10(p_ada), y = -log10(p_ifx), col = ada_ifx_sig)) +
+  geom_point() +
+  xlim(0, 25) +
+  ylim(0, 25) +
+  xlab(expression(-log[10](pvalue[ada]))) +
+  ylab(expression(-log[10](pvalue[ifx]))) +
+  ggtitle("Adalimumab & Infliximab") +
+  scale_color_manual(values = treatment_col, name= "", drop = F) +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+
+ifxvvedo <- ggplot(data.frame(vedo_ada_ifx_rvnr), aes(x = -log10(p_ifx), y = -log10(p_vedo), col = ifx_vedo_sig)) +
+  geom_point() +
+  xlim(0, 25) +
+  ylim(0, 25) +
+  xlab(expression(-log[10](pvalue[ifx]))) +
+  ylab(expression(-log[10](pvalue[vedo]))) +
+  ggtitle("Infliximab & Vedolizumab") +
+  scale_color_manual(values = treatment_col, name= "", drop = F) +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+
+int_dmpplot <- ggarrange(vedovada, adavifx, ifxvvedo, nrow = 1, ncol = 3, common.legend = T, legend = "bottom")
+```
+
+Expectedly, limited overlap was observed when comparing infliximab and adalimumab with vedolizumab. Interestingly, only limited overlap was observed when comparing adalimumab and infliximab, suggesting that the response pattern observed is not exactly the same either. At a BH-adjusted alpha of 0.05, we observe two CpGs that were found to be differential in both
+
+```{r integrative dmps}
+vedo_ada_ifx_rvnr[vedo_ada_ifx_rvnr$padj_ada <= 0.05 & vedo_ada_ifx_rvnr$padj_ifx <= 0.05,]
+
+gmset_ada_anno_gr["cg13280694",]
+gmset_ada_anno_gr["cg17601909",]
+
+ol_cpgs_betas <- rbind(data.frame(Beta = betas_vedo["cg13280694",], 
+                                  Response = pData(gmset_vedo_filtered)$Response,
+                                  Cohort = "Vedolizumab",
+                                  CpG = "cg13280694"),
+                       data.frame(Beta = betas_ada["cg13280694",], 
+                                  Response = pData(gmset_ada_filtered)$Response,
+                                  Cohort = "Adalimumab",
+                                  CpG = "cg13280694"),
+                       data.frame(Beta = betas_ifx["cg13280694",], 
+                                  Response = pData(gmset_ifx_filtered)$Response,
+                                  Cohort = "Infliximab",
+                                  CpG = "cg13280694"),
+                       data.frame(Beta = betas_vedo["cg17601909",], 
+                                  Response = pData(gmset_vedo_filtered)$Response,
+                                  Cohort = "Vedolizumab",
+                                  CpG = "cg17601909"),
+                       data.frame(Beta = betas_ada["cg17601909",], 
+                                  Response = pData(gmset_ada_filtered)$Response,
+                                  Cohort = "Adalimumab",
+                                  CpG = "cg17601909"),
+                       data.frame(Beta = betas_ifx["cg17601909",], 
+                                  Response = pData(gmset_ifx_filtered)$Response,
+                                  Cohort = "Infliximab",
+                                  CpG = "cg17601909"))
+
+ol_cpgs_plot <- ggplot(ol_cpgs_betas, aes(x = Response, y = Beta, shape = Response, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  ylim(0,1) +
+  scale_shape_manual(values=(1:nlevels(ol_cpgs_betas$Response))%%10) +
+  facet_grid(CpG ~ Cohort) +
+  theme_bw() +
+  theme(text = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.position = "bottom")
+
+```
+
+###Integrated analysis
+
+```{r integrated atnf analysis}
+atnfdmpDir <- file.path(dmpDir, "atnf")
+dir.create(atnfdmpDir)
+
+pdata_ifx <- pData(gmset_ifx_filtered)
+pdata_ada <- pData(gmset_ada_filtered)
+
+pdata_atnf <- data.frame(resptime = c(pdata_ifx$resptime, pdata_ada$resptime),
+                         Response = c(pdata_ifx$Response, pdata_ada$Response),
+                         Sex = c(pdata_ifx$Sex, pdata_ada$Sex),
+                         Age = c(pdata_ifx$Age, pdata_ada$Age),
+                         Cohort = c(rep("Infliximab", nrow(pdata_ifx)), rep("Adalimumab", nrow(pdata_ada))),
+                         row.names = paste0("X", c(rownames(pdata_ifx), rownames(pdata_ada))))
+
+mvals_atnf <- merge(data.frame(mvals_ifx, CpG = rownames(mvals_ifx)),
+                    data.frame(mvals_ada, CpG = rownames(mvals_ada)),
+                    by = "CpG")
+mvals_atnf <- data.frame(mvals_atnf[,-1], row.names = mvals_atnf$CpG)
+
+betas_atnf <- merge(data.frame(betas_ifx, CpG = rownames(betas_ifx)),
+                    data.frame(betas_ada, CpG = rownames(betas_ada)),
+                    by = "CpG")
+betas_atnf <- data.frame(betas_atnf[,-1], row.names = betas_atnf$CpG)
+
+design_atnf <- model.matrix(~0 + resptime + Sex + Age + Cohort, data = pdata_atnf)
+colnames(design_atnf) <- c("T1_NR", "T2_NR", "T1_R", "T2_R", "Male", "Age", "Study")
+mvals_lmfit_atnf <- lmFit(mvals_atnf, design = design_atnf)
+betas_lmfit_atnf <- lmFit(betas_atnf, design = design_atnf)
+
+contrast_mat_atnf <- makeContrasts(
+  RvNR = (T1_R+T2_R)/2-(T1_NR+T2_NR)/2,
+  T2vT1 = (T2_R+T2_NR)/2-(T1_R+T1_NR)/2,
+  T2RvT1R = T2_R-T1_R,
+  T2NRvT1NR = T2_NR-T1_NR,
+  TR = (T2_R-T1_R)-(T2_NR-T1_NR),
+  levels = design_atnf
+)
+
+mvals_contrastfit_atnf <- contrasts.fit(mvals_lmfit_atnf, contrast_mat_atnf)
+mvals_ebayes_atnf <- eBayes(mvals_contrastfit_atnf)
+
+betas_contrastfit_atnf <- contrasts.fit(betas_lmfit_atnf, contrast_mat_atnf)
+betas_ebayes_atnf <- eBayes(betas_contrastfit_atnf)
+```
+
+```{r integrated atnf DMPs}
+RvNR_atnf_top <- topTable(mvals_ebayes_atnf, coef = "RvNR", number = "Inf", adjust.method = "BH")
+RvNR_atnf_top <- cbind(RvNR_atnf_top, Beta = coefficients(betas_ebayes_atnf)[rownames(RvNR_atnf_top), "RvNR"], as.data.frame(gmset_ifx_anno_gr[rownames(RvNR_atnf_top), ]))
+
+write.csv(RvNR_atnf_top, file.path(atnfdmpDir, "RvNR_atnf_top.csv"))
+
+RvNR_atnf_top_gr <- makeGRangesFromDataFrame(RvNR_atnf_top, keep.extra.columns = T)
+
+NDlib::cpg_strip_plot(cpg_num = names(RvNR_atnf_top_gr[1]), 
+                      betas = betas_atnf, 
+                      factor_interest = paste0(as.character(pdata_atnf$resptime), "_", as.character(pdata_atnf$Cohort)), 
+                      legend = F)
+```
+
+```{r integrated atnf significant DMPs}
+RvNR_atnf_sig <- RvNR_atnf_top[RvNR_atnf_top$adj.P.Val<0.05,]
+write.csv(RvNR_atnf_sig, file.path(atnfdmpDir, "RvNR_atnf_sig.csv"))
+```
+
+```{r atnf genes with multiple dmps}
+RvNR_atnf_mdmpDir <- file.path(atnfdmpDir, "gene_mdmps")
+dir.create(RvNR_atnf_mdmpDir)
+
+RvNR_atnf_sig_genes <- do.call(c, lapply(strsplit(x = paste0(RvNR_atnf_sig$UCSC_RefGene_Name, ";", RvNR_atnf_sig$enhancer_gene), ";"), unique))
+RvNR_atnf_sig_genes_freq <- sort(table(RvNR_atnf_sig_genes))
+RvNR_atnf_sig_genes_bg <- unlist(lapply(names(RvNR_atnf_sig_genes_freq), function(gene){length(grep(gene, paste0(gmset_ifx_anno_gr$UCSC_RefGene_Name, ";", gmset_ifx_anno_gr$enhancer_gene)))}))
+names(RvNR_atnf_sig_genes_bg) <- names(RvNR_atnf_sig_genes_freq)
+RvNR_atnf_sig_genes_prop <- data.frame(frequency = as.vector(RvNR_atnf_sig_genes_freq),
+                                       background = as.vector(RvNR_atnf_sig_genes_bg),
+                                       proportion = as.vector(RvNR_atnf_sig_genes_freq)/as.vector(RvNR_atnf_sig_genes_bg),
+                                       row.names = names(RvNR_atnf_sig_genes_freq))
+
+RvNR_atnf_sig_genes_prop_mdmp <- RvNR_atnf_sig_genes_prop[RvNR_atnf_sig_genes_prop$frequency>1,]
+RvNR_atnf_sig_genes_prop_mdmp <- RvNR_atnf_sig_genes_prop_mdmp[order(RvNR_atnf_sig_genes_prop_mdmp$proportion, decreasing = T),]
+RvNR_atnf_sig_genes_prop_mdmp <- RvNR_atnf_sig_genes_prop_mdmp[rownames(RvNR_atnf_sig_genes_prop_mdmp) != "",]
+
+write.csv(RvNR_atnf_sig_genes_prop, file.path(atnfdmpDir, "RvNR_atnf_DMP_prop.csv"))
+```
+
+```{r atnf dmrs}
+adadmrDir <- file.path(dmrDir, "atnf")
+dir.create(adadmrDir)
+
+require(DMRcate)
+
+set.seed(45327952)
+RvNR_dmr_atnf_anno <- cpg.annotate(object = as.matrix(mvals_atnf),
+                                   datatype = "array",
+                                   arraytype = "EPIC",
+                                   what = "M",
+                                   analysis.type = "differential",
+                                   design = design_atnf,
+                                   contrasts = T,
+                                   cont.matrix = contrast_mat_atnf,
+                                   coef = "RvNR")
+RvNR_dmr_atnf <- dmrcate(RvNR_dmr_atnf_anno, lambda = 1000, C = 2, min.cpgs = 3, mc.cores = 8, pcutoff = 0.05)
+RvNR_dmr_atnf_gr <- extractRanges(RvNR_dmr_atnf, genome = "hg19")
+
+RvNR_dmr_atnf_gr <- annotatePeakInBatch(myPeakList = RvNR_dmr_atnf_gr, 
+                                        AnnotationData = unlist(reduce(transcriptsBy(x = TxDb.Hsapiens.UCSC.hg19.knownGene, by = "gene"))), 
+                                        output="nearestBiDirectionalPromoters",
+                                        bindingRegion=c(-5000, 1000))
+names(RvNR_dmr_atnf_gr) <- 1:length(RvNR_dmr_atnf_gr)
+RvNR_dmr_atnf_gr$Gene <- mapIds(x = org.Hs.eg.db, 
+                               keys = RvNR_dmr_atnf_gr$feature, 
+                               column="SYMBOL", 
+                               keytype="ENTREZID", 
+                               multiVals="first")
+write.csv(as.data.frame(RvNR_dmr_atnf_gr), file.path(atnfdmrDir, "RvNR_atnf.csv"))
+
+atnfdmrplot1 <- dmr_plot(dmr_gr = RvNR_dmr_atnf_gr[1], meth_data = betas_atnf, anno_gr = gmset_ada_anno_gr, meth_groups = paste0(pdata_atnf$Response, "_", pdata_atnf$Cohort)) + ggtitle(RvNR_dmr_atnf_gr$Gene[1])
+```
+
+```{r atnf dmeg}
+#All DMEGs
+RvNR_atnf_sig_gene_mdmp <- rownames(RvNR_atnf_sig_genes_prop_mdmp)
+RvNR_atnf_sig_gene_mdmp <- RvNR_atnf_sig_gene_mdmp[-which(RvNR_atnf_sig_gene_mdmp == "")]
+
+#Promoters only
+RvNR_atnf_mdmppromDir <- file.path(RvNR_atnf_mdmpDir, "promoters")
+dir.create(RvNR_atnf_mdmppromDir)
+
+RvNR_atnf_sig_gene_mdmp_p_gr <- makeGRangesFromDataFrame(do.call(rbind, lapply(RvNR_atnf_sig_gene_mdmp, function(i) {
+  df <- RvNR_atnf_sig[grep(i, RvNR_atnf_sig$UCSC_RefGene_Name),]
+  if(nrow(df) == 0) return(NULL)
+  else{
+    df_min <- with(df, data.frame(seqnames = unique(seqnames),
+                                  start = min(start),
+                                  end = max(end),
+                                  gene = i))
+    
+    return(df_min)
+  }
+})), keep.extra.columns = T)
+
+for(i in 1:length(RvNR_atnf_sig_gene_mdmp_p_gr)){
+  Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(RvNR_atnf_mdmppromDir, paste0(RvNR_atnf_sig_gene_mdmp_p_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_effect_plot(region_of_interest = RvNR_atnf_sig_gene_mdmp_p_gr[i,], tophits = RvNR_atnf_top_gr))
+  dev.off()
+}
+
+#Promoters and enhancers
+RvNR_atnf_mdmpfullDir <- file.path(RvNR_atnf_mdmpDir, "promoters_and_enhancers")
+dir.create(RvNR_atnf_mdmpfullDir)
+
+RvNR_atnf_sig_gene_mdmp_gr <- makeGRangesFromDataFrame(do.call(rbind, lapply(RvNR_atnf_sig_gene_mdmp, function(i) {
+  df <- RvNR_atnf_sig[grep(i, paste0(RvNR_atnf_sig$UCSC_RefGene_Name, ";", RvNR_atnf_sig$enhancer_gene)),]
+  df_min <- with(df, data.frame(seqnames = unique(seqnames),
+                                start = min(start),
+                                end = max(end),
+                                gene = i))
+  
+  return(df_min)
+})), keep.extra.columns = T)
+
+atnfdmrplot2 <- dmr_plot(dmr_gr = RvNR_atnf_sig_gene_mdmp_gr[3], meth_data = betas_atnf, anno_gr = gmset_ada_anno_gr, meth_groups = paste0(pdata_atnf$Response, "_", pdata_atnf$Cohort)) + ggtitle(RvNR_atnf_sig_gene_mdmp_gr$gene[3])
+
+Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(RvNR_atnf_mdmpDir, "H2AFJ_separate.pdf"), bg = "white", units = "px", dpi = 120)
+print(atnfdmrplot2)
+dev.off()
+
+for(i in 1:length(RvNR_atnf_sig_gene_mdmp_gr)){
+  Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(RvNR_atnf_mdmpfullDir, paste0(RvNR_atnf_sig_gene_mdmp_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_effect_plot(region_of_interest = RvNR_atnf_sig_gene_mdmp_gr[i,], tophits = RvNR_atnf_top_gr))
+  dev.off()
+}
+```
+
+```{r aTNF sig dmp KEGG overrepresentation}
+require(missMethyl)
+
+RvNR_atnf_dmp_enrichment <- gometh(rownames(RvNR_atnf_sig), all.cpg = rownames(betas_atnf), collection = "KEGG", array.type = "EPIC", plot.bias = FALSE, prior.prob = TRUE)
+RvNR_atnf_dmp_enrichment <- RvNR_atnf_dmp_enrichment[order(RvNR_atnf_dmp_enrichment$P.DE),]
+write.csv(RvNR_atnf_dmp_enrichment, file.path(atnfdmpDir, "atnf_dmp_enrichment.csv"))
+```
+
+```{r aTNF dmprom KEGG enrichment}
+require(ChIPpeakAnno)
+require(dplyr)
+require(fgsea)
+
+RvNR_gene_atnf_top_gr <- annotatePeakInBatch(myPeakList = makeGRangesFromDataFrame(RvNR_atnf_top, keep.extra.columns = T), 
+                                             AnnotationData = unlist(reduce(transcriptsBy(x = TxDb.Hsapiens.UCSC.hg19.knownGene, by = "gene"))), 
+                                             output="nearestBiDirectionalPromoters",
+                                             bindingRegion=c(-5000, 1000))
+
+RvNR_gene_atnf_top_agg <- RvNR_gene_atnf_top_gr %>% 
+  data.frame() %>%
+  group_by(feature) %>%
+  dplyr::summarize(MeanBeta = mean(Beta, na.rm=TRUE))
+
+RvNR_gene_atnf_top_bd <- RvNR_gene_atnf_top_agg$MeanBeta
+names(RvNR_gene_atnf_top_bd) <- RvNR_gene_atnf_top_agg$feature
+
+RvNR_gene_atnf_obj <- fgsea(pathways = kegg_hs, 
+                            stats = RvNR_gene_atnf_top_bd,
+                            minSize = 15,
+                            maxSize = 500,
+                            nperm = 10000)
+RvNR_gene_atnf_obj <- RvNR_gene_atnf_obj[order(RvNR_gene_atnf_obj$pval),]
+
+RvNR_gene_atnf_obj$ID <- gsub("^[A-Z0-9_]+_MM_(.+)_Ensembl$", "\\1", RvNR_gene_atnf_obj$pathway)
+kegg_RvNR_gene_atnf <- data.frame(RvNR_gene_atnf_obj)[-8]
+
+write.csv(kegg_RvNR_gene_atnf, file.path(atnfdmpDir, "kegg_RvNR_gene_atnf.csv"))
+```
+
+```{r atnf gaphunting}
+atnfgvDir <- file.path(atnfdmpDir, "genetic_variants")
+dir.create(atnfgvDir)
+
+require(SNPlocs.Hsapiens.dbSNP151.GRCh38)
+require(liftOver)
+require(rsnps)
+atnf_gh <- gaphunter(object = gmset_ada_filtered)
+
+RvNR_atnf_sig_cpgs_gh <- intersect(rownames(atnf_gh$proberesults), rownames(RvNR_atnf_sig))
+RvNR_atnf_sig_cpgs_gh <- atnf_gh$proberesults[RvNR_atnf_sig_cpgs_gh,]
+
+RvNR_atnf_sig_cpgs_gh_anno_gr <- makeGRangesFromDataFrame(gmset_ada_anno[rownames(RvNR_atnf_sig_cpgs_gh),], keep.extra.columns = F, start.field = "pos", end.field = "pos")
+
+hg19tohg38 <- import.chain("/home/ayliyim/archive/common_data/liftover_chains/hg19ToHg38.over.chain")
+
+RvNR_atnf_sig_cpgs_gh_anno_hg38_gr <- unlist(liftOver(RvNR_atnf_sig_cpgs_gh_anno_gr, hg19tohg38))
+#RvNR_atnf_sig_cpgs_gh_anno_hg38_gr <- split(RvNR_atnf_sig_cpgs_gh_anno_hg38_gr, seqnames(RvNR_atnf_sig_cpgs_gh_anno_hg38_gr))
+RvNR_atnf_sig_cpgs_gh_anno_hg38_gr <- RvNR_atnf_sig_cpgs_gh_anno_hg38_gr+50
+seqlevelsStyle(RvNR_atnf_sig_cpgs_gh_anno_hg38_gr) <- seqlevelsStyle(SNPlocs.Hsapiens.dbSNP151.GRCh38)
+
+RvNR_atnf_sig_cpgs_gh_snps <- snpsByOverlaps(x = SNPlocs.Hsapiens.dbSNP151.GRCh38, ranges = RvNR_atnf_sig_cpgs_gh_anno_hg38_gr)
+saveRDS(RvNR_atnf_sig_cpgs_gh_snps, file.path(atnfgvDir, "RvNR_atnf_sig_GVs.Rds"))
+
+#MAF
+require(biomaRt)
+enssnp_mart <- useDataset("hsapiens_snp", mart = "ENSEMBL_MART_SNP")
+RvNR_atnf_sig_cpgs_gh_snps_df <- getBM(attributes = c("refsnp_id", "allele", "minor_allele_freq"), filters = "snp_filter", values = RvNR_atnf_sig_cpgs_gh_snps$RefSNP_id, mart = enssnp_mart)
+RvNR_atnf_sig_cpgs_gh_snps_df <- RvNR_atnf_sig_cpgs_gh_snps_df[!is.na(RvNR_atnf_sig_cpgs_gh_snps_df$minor_allele_freq),]
+
+RvNR_atnf_sig_cpgs_gh_snps <- makeGRangesFromDataFrame(merge(data.frame(RvNR_atnf_sig_cpgs_gh_snps), RvNR_atnf_sig_cpgs_gh_snps_df, by.x = "RefSNP_id", by.y = "refsnp_id"), keep.extra.columns = T, start.field = "pos", end.field = "pos")
+
+RvNR_atnf_sig_cpgs_gh_snps_pcgv_ol <- findOverlaps(RvNR_atnf_sig_cpgs_gh_snps, RvNR_atnf_sig_cpgs_gh_anno_hg38_gr)
+
+RvNR_atnf_sig_cpgs_gh_snps_ol <- RvNR_atnf_sig_cpgs_gh_snps[queryHits(RvNR_atnf_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_atnf_sig_cpgs_gh_snps_ol$CpG <- names(RvNR_atnf_sig_cpgs_gh_anno_hg38_gr)[subjectHits(RvNR_atnf_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_atnf_sig_cpgs_gh_snps_ol$CpG_pos <- start(RvNR_atnf_sig_cpgs_gh_anno_hg38_gr-50)[subjectHits(RvNR_atnf_sig_cpgs_gh_snps_pcgv_ol)]
+RvNR_atnf_sig_cpgs_gh_snps_ol$GV_relpos <- RvNR_atnf_sig_cpgs_gh_snps_ol$CpG_pos-start(RvNR_atnf_sig_cpgs_gh_snps_ol)
+RvNR_atnf_sig_cpgs_gh_snps_ol$GV_type <- "probe GV"
+RvNR_atnf_sig_cpgs_gh_snps_ol$GV_type[RvNR_atnf_sig_cpgs_gh_snps_ol$GV_relpos == 0] <- "CpG GV"
+RvNR_atnf_sig_cpgs_gh_snps_ol$Gene <- RvNR_atnf_sig$UCSC_RefGene_Name[match(RvNR_atnf_sig_cpgs_gh_snps_ol$CpG, RvNR_atnf_sig$Name)]
+RvNR_atnf_sig_cpgs_gh_snps_ol$Beta <- RvNR_atnf_sig$P.Value[match(RvNR_atnf_sig_cpgs_gh_snps_ol$CpG, RvNR_atnf_sig$Name)]
+RvNR_atnf_sig_cpgs_gh_snps_ol$Pvalue <- RvNR_atnf_sig$Beta[match(RvNR_atnf_sig_cpgs_gh_snps_ol$CpG, RvNR_atnf_sig$Name)]
+RvNR_atnf_sig_cpgs_gh_snps_df <- data.frame(RvNR_atnf_sig_cpgs_gh_snps_ol)
+RvNR_atnf_sig_cpgs_gh_snps_df <- RvNR_atnf_sig_cpgs_gh_snps_df[, c("CpG", "seqnames", "CpG_pos", "Beta", "Pvalue", "RefSNP_id", "start", "GV_relpos", "allele", "GV_type", "minor_allele_freq", "Gene")]
+colnames(RvNR_atnf_sig_cpgs_gh_snps_df) <- c("CpG", "Chromosome", "CpG_position", "Beta", "Pvalue", "RSID", "GV_position", "GV_CpG_relpos", "Alleles", "GV_type", "MAF_all_1000g", "Gene")
+
+write.csv(RvNR_atnf_sig_cpgs_gh_snps_df, file = file.path(atnfgvDir, "RvNR_atnf_sig_GVs.csv"))
+
+#up
+RvNR_atnf_sig_cl_plot <- data.frame(Type = c("non-clustered", "clustered"),
+           DMPs = c(nrow(RvNR_atnf_sig)-nrow(RvNR_atnf_sig_cpgs_gh), nrow(RvNR_atnf_sig_cpgs_gh)),
+           Group = "DMPs") %>%
+  ggplot(aes(x = Group, y = DMPs, fill = Type)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = DMPs), position = position_stack(vjust = 0.5)) +
+  scale_fill_viridis(discrete = T) +
+  coord_flip() +
+  ggtitle("DMPs with catalogued GVs") +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+#left
+RvNR_atnf_sig_typegv_df <- data.frame(table(RvNR_atnf_sig_cpgs_gh_snps_df$GV_type))
+colnames(RvNR_atnf_sig_typegv_df) <- c("Location", "GVs")
+RvNR_atnf_sig_typegv_df$Location <- gsub(" GV", "", RvNR_atnf_sig_typegv_df$Location)
+
+RvNR_atnf_sig_typegv_plot <- ggplot(RvNR_atnf_sig_typegv_df, aes(x = Location, y = GVs)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = GVs), position = position_stack(vjust = 0.5)) +
+  ggtitle("Location of GVs") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+RvNR_atnf_gc_plot_tr <- ggarrange(RvNR_atnf_sig_cl_plot, RvNR_atnf_sig_typegv_plot, nrow = 2, align = "v", heights = c(0.5, 1))
+
+#right
+RvNR_atnf_sig_cpgs_gv_plot <- data.frame(RvNR_atnf_sig_cpgs_gh_snps_ol) %>%
+  ggplot(aes(x = GV_relpos, y = minor_allele_freq, col = minor_allele_freq, alpha = -log(abs(GV_relpos+0.001)))) +
+  #geom_line(aes(group = CpG)) +
+  geom_point() +
+  geom_rect(data = data.frame(x0 = -1.5, x1 = 1.5),
+            inherit.aes = FALSE,
+            aes(xmin = x0, xmax = x1, ymin = -Inf, ymax = Inf), alpha = 0.15) +
+  #facet_wrap(~CpG, ncol = 12) +
+  xlab("Position relative to CpG of interest") +
+  ylab("MAF") +
+  theme_bw() +
+  theme(legend.pos = "none", 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+RvNR_atnf_gc_plot <- ggarrange(RvNR_atnf_gc_plot_tr, RvNR_atnf_sig_cpgs_gv_plot, ncol = 2, widths = c(0.5, 1))
+
+Cairo(width = 2500, height = 1250, type = "pdf", file = file.path(atnfgvDir, "RvNR_atnf_sig_GVs.pdf"), bg = "white", units = "px", dpi = 120)
+#Cairo(width = 10000, height = 3000, type = "pdf", file = file.path(atnfgvDir, "RvNR_atnf_sig_GVs.pdf"), bg = "white", units = "px", dpi = 120)
+print(RvNR_atnf_gc_plot)
+dev.off()
+```
+
+```{r pathways of interest}
+require(pathview)
+
+pwDir <- file.path(outputDir, "gsa")
+dir.create(pwDir)
+
+kegg_pw <- read.csv(file.path("data", "kegg_pathways.txt"), sep = "\t")
+
+kegg_RvNR_gene_ada$keggID <- gsub("(hsa[0-9]+).+", "\\1", kegg_RvNR_gene_ada$pathway)
+kegg_RvNR_gene_ada$pathway <- gsub("_", " ", kegg_RvNR_gene_ada$pathway)
+kegg_RvNR_gene_ada_ol <- kegg_RvNR_gene_ada[kegg_RvNR_gene_ada$keggID %in% kegg_pw$KEGG_ID,]
+
+kegg_RvNR_gene_ifx$keggID <- gsub("(hsa[0-9]+).+", "\\1", kegg_RvNR_gene_ifx$pathway)
+kegg_RvNR_gene_ifx$pathway <- gsub("_", " ", kegg_RvNR_gene_ifx$pathway)
+kegg_RvNR_gene_ifx_ol <- kegg_RvNR_gene_ifx[kegg_RvNR_gene_ifx$keggID %in% kegg_pw$KEGG_ID,]
+
+kegg_RvNR_gene_atnf$keggID <- gsub("(hsa[0-9]+).+", "\\1", kegg_RvNR_gene_atnf$pathway)
+kegg_RvNR_gene_atnf$pathway <- gsub("_", " ", kegg_RvNR_gene_atnf$pathway)
+kegg_RvNR_gene_atnf_ol <- kegg_RvNR_gene_atnf[kegg_RvNR_gene_atnf$keggID %in% kegg_pw$KEGG_ID,]
+
+kegg_RvNR_gene_ol_list <- list(Adalimumab = kegg_RvNR_gene_ada_ol,
+                               Infliximab = kegg_RvNR_gene_ifx_ol,
+                               `Anti-TNF` = kegg_RvNR_gene_atnf_ol)
+
+Cairo(width = 1250, height = 2250, type = "pdf", file = file.path(pwDir, "aTNF_kegg.pdf"), bg = "white", units = "px", dpi = 120)
+NDlib::multenrich_plot(enrich_list = kegg_RvNR_gene_ol_list, pathway_col = "pathway", es_col = "NES", pval_col = "pval", padj_col = "pval", alpha = 0.05)
+dev.off()
+
+#B cell receptor signaling pathway (hsa04662)
+atnf_hsa04662 <- pathview(gene.data = RvNR_gene_atnf_top_bd*20, 
+                          pathway.id = "hsa04662", 
+                          species = "hsa", 
+                          out.suffix = "atnf", 
+                          kegg.native = T, same.layer = T)
+
+
+#TNF signaling pathway (hsa04668)
+atnf_hsa04668 <- pathview(gene.data = RvNR_gene_atnf_top_bd*20, 
+                          pathway.id = "hsa04668", 
+                          species = "hsa", 
+                          out.suffix = "atnf", 
+                          kegg.native = T, same.layer = T)
+```
+
+
+```{r}
+RvNR_atnf_cpgs <- intersect(rownames(RvNR_ada_top), rownames(RvNR_ifx_top))
+
+stat_cols <- c("Beta", "t", "P.Value", "adj.P.Val")
+
+RvNR_atnf_df <- cbind(RvNR_ada_top[RvNR_atnf_cpgs, stat_cols], RvNR_ifx_top[RvNR_atnf_cpgs, stat_cols], RvNR_atnf_top[RvNR_atnf_cpgs, c("t", "P.Value", "adj.P.Val")])
+colnames(RvNR_atnf_df) <- c("ada_beta", "ada_t", "ada_pvalue", "ada_padj", 
+                            "ifx_beta", "ifx_t", "ifx_pvalue", "ifx_padj", 
+                            "t", "atnf_pvalue", "atnf_padj")
+RvNR_atnf_df$significant <- "Non-significant"
+RvNR_atnf_df$significant[RvNR_atnf_df$atnf_padj<0.05] <- "Significant"
+
+atnf_plot_all <- ggplot(RvNR_atnf_df, aes(x = ada_beta, y = ifx_beta, col = significant)) +
+  geom_hline(yintercept = 0, col = "lightgrey") +
+  geom_vline(xintercept = 0, col = "lightgrey") +
+  geom_point(aes(alpha = -log10(atnf_pvalue))) +
+  xlim(-1, 1) +
+  ylim(-1, 1) +
+  xlab("Difference R vs NR adalimumab") +
+  ylab("Difference R vs NR infliximab") +
+  ggtitle("Anti-TNF") +
+  scale_color_manual(values = c(`Non-significant` = "#D3D3D3", Significant = "black")) +
+  theme_bw() +
+  theme(text = element_text(size = 12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+RvNR_atnf_sig <- RvNR_atnf_df[RvNR_atnf_df$significant == "Significant",]
+atnf_plot_sig <- ggplot(RvNR_atnf_sig, aes(x = ada_beta, y = ifx_beta)) +
+  geom_hline(yintercept = 0, col = "lightgrey") +
+  geom_vline(xintercept = 0, col = "lightgrey") +
+  geom_point(shape = 21, fill = "grey", aes(size = -log10(atnf_pvalue))) +
+  xlim(-1, 1) +
+  ylim(-1, 1) +
+  xlab("Difference adalimumab") +
+  ylab("Difference infliximab") +
+  ggtitle("Anti-TNF Responders vs Nonresponders") +
+  theme_bw() +
+  theme(text = element_text(size = 12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+```
+
+##DMRs
+
+#Classification (THIS WONT WORK WITH THE CURRENT NUMBER OF SAMPLES)
+
+```{r classifier setup}
+require(glmnet)
+```
+
+To curb data leakage, we will perform cross-validation on the non-normalized data.
+
+```{r preprocessing}
+#Vedolizumab
+raw_vedo <- preprocessRaw(rgset_vedo)
+raw_vedo_nosex <- raw_vedo[-which(minfi::getAnnotation(raw_vedo)$chr %in% c("chrX", "chrY")),]
+raw_vedo_filtered <- raw_vedo_nosex[!names(raw_vedo_nosex) %in% pmprobes,]
+raw_vedo_filtered <- raw_vedo_filtered[-unique(which(is.na(getBeta(raw_vedo_filtered)), arr.ind = T)[,1]),]
+
+#Adalimumab
+raw_ada <- preprocessRaw(rgset_ada)
+raw_ada_nosex <- raw_ada[-which(minfi::getAnnotation(raw_ada)$chr %in% c("chrX", "chrY")),]
+raw_ada_filtered <- raw_ada_nosex[!names(raw_ada_nosex) %in% pmprobes,]
+raw_ada_filtered <- raw_ada_filtered[-unique(which(is.na(getBeta(raw_ada_filtered)), arr.ind = T)[,1]),]
+
+#Infliximab
+raw_ifx <- preprocessRaw(rgset_ifx)
+raw_ifx_nosex <- raw_ifx[-which(minfi::getAnnotation(raw_ifx)$chr %in% c("chrX", "chrY")),]
+raw_ifx_filtered <- raw_ifx_nosex[!names(raw_ifx_nosex) %in% pmprobes,]
+raw_ifx_filtered <- raw_ifx_filtered[-unique(which(is.na(getBeta(raw_ifx_filtered)), arr.ind = T)[,1]),]
+```
+
+For building a classifier, we will create a training (2/3) and testing (1/3) set at random.
+
+```{r splitting the training and testing}
+#Vedolizumab
+raw_vedo <- preprocessRaw(rgset_vedo)
+raw_vedo_nosex <- raw_vedo[-which(minfi::getAnnotation(raw_vedo)$chr %in% c("chrX", "chrY")),]
+raw_vedo_filtered <- raw_vedo_nosex[!names(raw_vedo_nosex) %in% pmprobes,]
+raw_vedo_filtered <- raw_vedo_filtered[-unique(which(is.na(getBeta(raw_vedo_filtered)), arr.ind = T)[,1]),]
+
+#Vedolizumab
+vedo_r <- which(pData(raw_vedo_filtered)$Response == "Responder")
+vedo_nr <- which(pData(raw_vedo_filtered)$Response == "Nonresponder")
+
+set.seed(13249523)
+test_vedo_r <- sample(x = vedo_r, size = length(vedo_r)/3, replace = F)
+test_vedo_nr <- sample(x = vedo_nr, size = length(vedo_nr)/3, replace = F)
+train_vedo_r <- vedo_r[!vedo_r %in% test_vedo_r]
+train_vedo_nr <- vedo_nr[!vedo_nr %in% test_vedo_nr]
+
+test_vedo_ind <- c(test_vedo_r, test_vedo_nr)
+train_vedo_ind <- c(train_vedo_r, train_vedo_nr)
+
+test_vedo <- raw_vedo_filtered[,test_vedo_ind]
+train_vedo <- raw_vedo_filtered[,train_vedo_ind]
+
+#Vedolizumab
+beta_vedo_test <- getBeta(test_vedo)
+beta_vedo_train <- getBeta(train_vedo)
+
+vedo_cvfit <- cv.glmnet(x = t(beta_vedo_train), 
+                        y = pData(train_vedo)$Response, 
+                        family = "binomial", 
+                        type.measure = "class", 
+                        standardize = T,
+                        alpha = 0.5)
+vedo_test_pred <- predict(vedo_cvfit, newx = t(beta_vedo_test), s = "lambda.min", type = "class")
+data.frame(predicted = vedo_test_pred[,1], actual = pData(test_vedo)$Response)
+
+vedo_nz_coefs <- coef(vedo_cvfit)[,1][which(coef(vedo_cvfit)[,1] != 0)]
+names(vedo_nz_coefs)[-1] %in% rownames(RvNR_vedo_sig)
+
+rownames(RvNR_vedo_sig)
+```
+
+```{r elastic net}
+#Adalimumab
+ada_r <- which(pData(raw_ada_filtered)$Response == "Responder")
+ada_nr <- which(pData(raw_ada_filtered)$Response == "Nonresponder")
+
+set.seed(564625)
+test_ada_r <- sample(x = ada_r, size = length(ada_r)/3, replace = F)
+test_ada_nr <- sample(x = ada_nr, size = length(ada_nr)/3, replace = F)
+train_ada_r <- ada_r[!ada_r %in% test_ada_r]
+train_ada_nr <- ada_nr[!ada_nr %in% test_ada_nr]
+
+test_ada_ind <- c(test_ada_r, test_ada_nr)
+train_ada_ind <- c(train_ada_r, train_ada_nr)
+
+test_ada <- raw_ada_filtered[,test_ada_ind]
+train_ada <- raw_ada_filtered[,train_ada_ind]
+
+#Infliximab
+ifx_r <- which(pData(raw_ifx_filtered)$Response == "Responder")
+ifx_nr <- which(pData(raw_ifx_filtered)$Response == "Nonresponder")
+
+set.seed(12357823)
+test_ifx_r <- sample(x = ifx_r, size = length(ifx_r)/3, replace = F)
+test_ifx_nr <- sample(x = ifx_nr, size = length(ifx_nr)/3, replace = F)
+train_ifx_r <- ifx_r[!ifx_r %in% test_ifx_r]
+train_ifx_nr <- ifx_nr[!ifx_nr %in% test_ifx_nr]
+
+test_ifx_ind <- c(test_ifx_r, test_ifx_nr)
+train_ifx_ind <- c(train_ifx_r, train_ifx_nr)
+
+test_ifx <- raw_ifx_filtered[,test_ifx_ind]
+train_ifx <- raw_ifx_filtered[,train_ifx_ind]
+
+#Adalimumab
+beta_ada_test <- getBeta(test_ada)
+beta_ada_train <- getBeta(train_ada)
+
+ada_cvfit <- cv.glmnet(x = t(beta_ada_train), 
+                       y = pData(train_ada)$Response, 
+                       family = "binomial", 
+                       type.measure = "class", 
+                       standardize = F, 
+                       alpha = 0.5)
+ada_test_pred <- predict(ada_cvfit, newx = t(beta_ada_test), s = "lambda.min", type = "class")
+data.frame(predicted = ada_test_pred[,1], actual = pData(test_ada)$Response)
+
+ada_nz_coefs <- coef(ada_cvfit)[,1][which(coef(ada_cvfit)[,1] != 0)]
+names(ada_nz_coefs)[-1] %in% rownames(RvNR_ada_sig)
+
+#Infliximab
+beta_ifx_test <- getBeta(test_ifx)
+beta_ifx_train <- getBeta(train_ifx)
+
+ifx_cvfit <- cv.glmnet(x = t(beta_ifx_train), 
+                       y = pData(train_ifx)$Response, 
+                       family = "binomial", 
+                       type.measure = "class", 
+                       standardize = F, 
+                       alpha = 0.5)
+ifx_test_pred <- predict(ifx_cvfit, newx = t(beta_ifx_test), s = "lambda.min", type = "class")
+data.frame(predicted = ifx_test_pred[,1], actual = pData(test_ifx)$Response)
+
+ifx_nz_coefs <- coef(ifx_cvfit)[,1][which(coef(ifx_cvfit)[,1] != 0)]
+names(ifx_nz_coefs)[-1] %in% rownames(RvNR_ifx_sig)
+
+NDlib::cpg_strip_plot(cpg_num = "cg03655023", betas = getBeta(raw_ifx_filtered), factor_interest = pData(raw_ifx_filtered)$Response)
+```
+
+#Data manuscript aTNF
+
+```{r aTNF setup data}
+atnfDir <- file.path("docs", "manuscript", "atnf")
+dir.create(atnfDir)
+atnffigDir <- file.path(atnfDir, "figures")
+dir.create(atnffigDir)
+atnftableDir <- file.path(atnfDir, "tables")
+dir.create(atnftableDir)
+
+CairoFonts(
+	regular="Helvetica:style=Regular",
+	bold="Helvetica:style=Bold",
+	italic="Helvetica:style=Italic",
+	bolditalic="Helvetica:style=Bold Italic,BoldItalic",
+	symbol="Symbol"
+)
+```
+
+Figure 1 Exploratory data analysis. Estimated blood cell proportion changes as a result of drug usage. Line charts indicating how the proportions of estimated blood cells (y-axis) changes as a result of drug usage (x-axis). Dashed lines indicate the individual samples, bold lines indicate the mean.
+
+```{r aTNF Fig1}
+atnffig1Dir <- file.path(atnffigDir, "fig1")
+dir.create(atnffig1Dir)
+
+#A
+atnffig1A <- ggarrange(mvals_ada_svd_plotobj + ggtitle("Adalimumab"), mvals_ifx_svd_plotobj + ggtitle("Infliximab"), nrow = 1, ncol = 2, common.legend = T, legend = "bottom")
+
+Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(atnffig1Dir, "fig1A.pdf"), bg = "white", units = "px", dpi = 120)
+print(atnffig1A)
+dev.off()
+
+#B
+atnffig1B1 <- grid.grabExpr(pheatmap(mat = betas_ada[rownames(RvNR_ada_top[1:50,]),],
+                                     annotation_col = RvNR_ada_hm_anno_col[,-2],
+                                     #annotation_row = RvNR_ada_hm_anno_row,
+                                     breaks = breaksList, 
+                                     show_colnames = F))
+atnffig1B2 <- grid.grabExpr(pheatmap(mat = betas_ifx[rownames(RvNR_ifx_top[1:50,]),],
+                                     annotation_col = RvNR_ifx_hm_anno_col[,-2],
+                                     #annotation_row = RvNR_ifx_hm_anno_row,
+                                     breaks = breaksList, 
+                                     show_colnames = F))
+atnffig1B <- plot_grid(atnffig1B1, atnffig1B2)
+
+Cairo(width = 2500, height = 1500, type = "pdf", file = file.path(atnffig1Dir, "fig1B.pdf"), bg = "white", units = "px", dpi = 120)
+print(atnffig1B)
+dev.off()
+
+#C
+atnffig1C1 <- ggplot(RvNR_ada_resp_time_df, aes(x = RvNR_beta, y = T2vT1_betas)) +
+  geom_hline(yintercept = 0, col = "lightgrey") +
+  geom_vline(xintercept = 0, col = "lightgrey") +
+  geom_point() +
+  theme_bw() +
+  xlim(-1,1) +
+  ylab("T2 vs T1") +
+  xlab("R vs NR") +
+  ylim(-1,1) +
+  theme(legend.pos = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+atnffig1C2 <- ggplot(RvNR_ifx_resp_time_df, aes(x = RvNR_beta, y = T2vT1_betas)) +
+  geom_hline(yintercept = 0, col = "lightgrey") +
+  geom_vline(xintercept = 0, col = "lightgrey") +
+  geom_point() +
+  theme_bw() +
+  xlim(-1,1) +
+  ylab("T2 vs T1") +
+  xlab("R vs NR") +
+  ylim(-1,1) +
+  theme(legend.pos = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+atnffig1C <- ggarrange(atnffig1C1, atnffig1C2, nrow = 1, ncol = 2)
+
+Cairo(width = 2000, height = 1000, type = "pdf", file = file.path(atnffig1Dir, "fig1C.pdf"), bg = "white", units = "px", dpi = 120)
+print(atnffig1C)
+dev.off()
+
+#D
+Cairo(width = 1250, height = 1000, type = "pdf", file = file.path(atnffig1Dir, "fig1D.pdf"), bg = "white", units = "px", dpi = 120)
+print(atnf_plot_sig)
+dev.off()
+
+```
+
+```{r aTNF Fig2}
+atnffig2Dir <- file.path(atnffigDir, "fig2")
+dir.create(atnffig2Dir)
+
+#Adalimumab
+RvNR_ada_sig_genes_prop_mdmp_df <- data.frame(RvNR_ada_sig_genes_prop_mdmp, Gene = rownames(RvNR_ada_sig_genes_prop_mdmp))
+RvNR_ada_sig_genes_prop_mdmp_df$Gene <- factor(RvNR_ada_sig_genes_prop_mdmp_df$Gene, levels = RvNR_ada_sig_genes_prop_mdmp_df$Gene)
+atnffig2_1 <- ggplot(RvNR_ada_sig_genes_prop_mdmp_df, aes(x = Gene, y = proportion)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  ylab("Proportion DMPs relative to probes") +
+  ggtitle("Adalimumab") +
+  theme(legend.pos = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.x = element_blank())
+
+#Infliximab
+RvNR_ifx_sig_genes_prop_mdmp_df <- data.frame(RvNR_ifx_sig_genes_prop_mdmp, Gene = rownames(RvNR_ifx_sig_genes_prop_mdmp))
+RvNR_ifx_sig_genes_prop_mdmp_df$Gene <- factor(RvNR_ifx_sig_genes_prop_mdmp_df$Gene, levels = RvNR_ifx_sig_genes_prop_mdmp_df$Gene)
+atnffig2_2 <- ggplot(RvNR_ifx_sig_genes_prop_mdmp_df, aes(x = Gene, y = proportion)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  #ylab("Proportion DMPs relative to probes") +
+  ggtitle("Infliximab") +
+  theme(legend.pos = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.x = element_blank())
+
+#Anti-TNF
+RvNR_atnf_sig_genes_prop_mdmp_df <- data.frame(RvNR_atnf_sig_genes_prop_mdmp, Gene = rownames(RvNR_atnf_sig_genes_prop_mdmp))
+RvNR_atnf_sig_genes_prop_mdmp_df$Gene <- factor(RvNR_atnf_sig_genes_prop_mdmp_df$Gene, levels = RvNR_atnf_sig_genes_prop_mdmp_df$Gene)
+atnffig2_3 <- ggplot(RvNR_atnf_sig_genes_prop_mdmp_df, aes(x = Gene, y = proportion)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  #ylab("Proportion DMPs relative to probes") +
+  ggtitle("Anti-TNF") +
+  theme(legend.pos = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.x = element_blank())
+
+atnffig2 <- ggarrange(atnffig2_1, atnffig2_2, atnffig2_3, nrow = 1, ncol = 3, align = "hv")
+
+Cairo(width = 2750, height = 750, type = "pdf", file = file.path(atnffig2Dir, "fig2A.pdf"), bg = "white", units = "px", dpi = 120)
+print(atnffig2)
+dev.off()
+
+```
+
+
+```{r aTNF FigS1}
+atnffigS1 <- ggarrange(mvals_ada_svd_corr_plotobj, mvals_ifx_svd_corr_plotobj, nrow = 1, ncol = 2, common.legend = T, legend = "bottom", labels = c("a", "b"))
+```
+
+Figure 2 Differential methylation analyses when comparing drug responders with non-responders. (a) Volcano plots of the DMP analyses depicting the effect size in percentage methylation on the x-axis and statistical significance on the y-axis (-log10(p-value)). (b) Heatmap of the top 50 statistically significant DMPs. Colors above the heatmap represent time of sampling, donor and response. Colors on the left of the heatmap represent the minor allele frequency (MAF) of SNPs found in the CpG of interest, or the probe binding region. (c) Visualization of the top two DMRs.
+
+```{r Fig2}
+fig2Dir <- file.path(figDir, "fig2")
+dir.create(fig2Dir)
+
+fig2Al <- with(RvNR_vedo_top, volcano_plot(effect_sizes = Beta, 
+                                           pvals = P.Value, 
+                                           int_effect_threshold = 0.1, 
+                                           significance = adj.P.Val < 0.05, 
+                                           identifiers = rownames(RvNR_vedo_top), 
+                                           title = "Vedolizumab"))
+fig2Am <- with(RvNR_ada_top, volcano_plot(effect_sizes = Beta, 
+                                          pvals = P.Value, 
+                                          int_effect_threshold = 0.1, 
+                                          significance = adj.P.Val < 0.05, 
+                                          identifiers = rownames(RvNR_ada_top), 
+                                          title = "Adalimumab"))
+fig2Ar <- with(RvNR_ifx_top, volcano_plot(effect_sizes = Beta, 
+                                          pvals = P.Value, 
+                                          int_effect_threshold = 0.1, 
+                                          significance = adj.P.Val < 0.05, 
+                                          identifiers = rownames(RvNR_ifx_top), 
+                                          title = "Infliximab"))
+
+fig2Bl <- grid.grabExpr(pheatmap(mat = betas_vedo[rownames(RvNR_vedo_top[1:50,]),],
+                                       annotation_col = RvNR_vedo_hm_anno_col,
+                                       annotation_row = RvNR_vedo_hm_anno_row,
+                                       breaks = breaksList, 
+                                       show_colnames = F))
+fig2Bm <- grid.grabExpr(pheatmap(mat = betas_ada[rownames(RvNR_ada_top[1:50,]),],
+                                       annotation_col = RvNR_ada_hm_anno_col,
+                                       annotation_row = RvNR_ada_hm_anno_row,
+                                       breaks = breaksList, 
+                                       show_colnames = F))
+fig2Br <- grid.grabExpr(pheatmap(mat = betas_ifx[rownames(RvNR_ifx_top[1:50,]),],
+                                       annotation_col = RvNR_ifx_hm_anno_col,
+                                       annotation_row = RvNR_ifx_hm_anno_row,
+                                       breaks = breaksList, 
+                                       show_colnames = F))
+
+fig2Cl <- overrep_plotter(pvals = RvNR_vedo_dmp_enrichment$P.DE, pathway = RvNR_vedo_dmp_enrichment$Pathway)
+fig2Cm <- overrep_plotter(pvals = RvNR_ada_dmp_enrichment$P.DE, pathway = RvNR_ada_dmp_enrichment$Pathway)
+fig2Cr <- overrep_plotter(pvals = RvNR_ifx_dmp_enrichment$P.DE, pathway = RvNR_ifx_dmp_enrichment$Pathway)
+
+fig2A <- ggarrange(fig2Al, fig2Am, fig2Ar, ncol = 3, nrow = 1)
+fig2B <- plot_grid(fig2Bl, fig2Bm, fig2Br, ncol = 3, nrow = 1)
+fig2C <- ggarrange(fig2Cl, fig2Cm, fig2Cr, ncol = 3, nrow = 1)
+fig2D <- int_dmpplot
+fig2E <- ol_cpgs_plot
+
+fig2 <- plot_grid(fig2A, fig2B, fig2C, fig2D, fig2E, nrow = 5, labels = c("a", "b", "c", "d", "e"))
+
+Cairo(width = 2500, height = 5000, type = "pdf", file = file.path(fig2Dir, "fig2.pdf"), bg = "white", units = "px", dpi = 120)
+plot_grid(fig2)
+dev.off()
+
+Cairo(width = 2000, height = 4000, type = "png", file = file.path(fig2Dir, "fig2.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(fig2)
+dev.off()
+```
+
+Figure 3 Genetic variant analysis
+
+```{r Fig3}
+fig3Dir <- file.path(figDir, "fig3")
+dir.create(fig3Dir)
+
+fig3Al_df <- data.frame(beta = RvNR_vedo_sig$Beta,
+                        type = "tDMP", 
+                        stringsAsFactors = F)
+fig3Al_df[which(RvNR_vedo_sig$CpG_maf > 0 | RvNR_vedo_sig$SBE_maf > 0), "type"] <- "cGV"
+fig3Al_df[which(RvNR_vedo_sig$Probe_maf > 0), "type"] <- "pGV"
+
+fig3Al <- ggplot(fig3Al_df, aes(x = type, y = beta, col = type)) +
+  geom_violin() +
+  geom_point() +
+  ylab("Methylation difference") +
+  ylim(-1, 1) +
+  ggtitle("Vedolizumab") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        text = element_text(size = 12))
+
+
+fig3Am_df <- data.frame(beta = RvNR_ada_sig$Beta,
+                        type = "tDMP", 
+                        stringsAsFactors = F) 
+fig3Am_df[which(RvNR_ada_sig$CpG_maf > 0 | RvNR_ada_sig$SBE_maf > 0), "type"] <- "cGV"
+fig3Am_df[which(RvNR_ada_sig$Probe_maf > 0), "type"] <- "pGV"
+
+fig3Am <- ggplot(fig3Am_df, aes(x = type, y = beta, col = type)) +
+  geom_violin() +
+  geom_point() +
+  ylab("Methylation difference") +
+  ylim(-1, 1) +
+  ggtitle("Adalimumab") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        text = element_text(size = 12))
+
+fig3Ar_df <- data.frame(beta = RvNR_ifx_sig$Beta,
+                        type = "tDMP", 
+                        stringsAsFactors = F) 
+fig3Ar_df[which(RvNR_ifx_sig$CpG_maf > 0 | RvNR_ifx_sig$SBE_maf > 0), "type"] <- "cGV"
+fig3Ar_df[which(RvNR_ifx_sig$Probe_maf > 0), "type"] <- "pGV"
+
+fig3Ar <- ggplot(fig3Ar_df, aes(x = type, y = beta, col = type)) +
+  geom_violin() +
+  geom_point() +
+  ylab("Methylation difference") +
+  ylim(-1, 1) +
+  ggtitle("Infliximab") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        text = element_text(size = 12))
+
+fig3 <- ggarrange(fig3Al, fig3Am, fig3Ar, nrow = 1, ncol = 3, common.legend = T, legend = "bottom")
+
+Cairo(width = 2750, height = 3500, type = "pdf", file = file.path(fig3Dir, "fig3.pdf"), bg = "white", units = "px", dpi = 120)
+plot_grid(fig3)
+dev.off()
+
+Cairo(width = 2000, height = 2500, type = "png", file = file.path(fig3Dir, "fig3.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(fig3)
+dev.off()
+```
+
+Figure 4 Differentially methylation analysis infliximab response. (A) Volcano plot depicting the effect size in percentage methylation on the x-axis and statistical significance on the y-axis (-log10(p-value)). (B) Heatmap of the 236 statistically significant DMPs. Colors above the heatmap represent time of sampling, donor and response. Colors on the left of the heatmap represent the minor allele frequency (MAF) of SNPs found in the CpG or probe binding region. (C) Violin plots displaying the distribution of the difference in methylation. DMR plots for (D), (E), and (F).
+
+```{r Fig4}
+fig4Dir <- file.path(figDir, "fig4")
+dir.create(fig4Dir)
+
+fig4a <- RvNR_ifx_vp
+fig4b <- RvNR_ifx_hm
+fig4c1 <- ifxdmrplot1
+fig4c2 <- ifxdmrplot2
+fig4c3 <- ifxdmrplot3
+fig4c4 <- ifxdmrplot4
+fig4c5 <- ifxdmrplot5
+fig4c6 <- ifxdmrplot6
+fig4c7 <- ifxdmrplot7
+fig4c8 <- ifxdmrplot8
+fig4c9 <- ifxdmrplot9
+fig4c10 <- ifxdmrplot10
+
+fig4c <- ggarrange(fig4c1, fig4c2, fig4c3, fig4c4, fig4c5, fig4c6, fig4c7, fig4c8, fig4c9, fig4c10, ncol = 2, nrow = 5, legend = "top", common.legend = T)
+
+fig4ac <- ggarrange(fig4a, fig4c, ncol = 1, nrow = 2, labels = c("a", "c"), heights = c(0.5, 1))
+
+fig4 <- plot_grid(fig4ac, fig4b, ncol = 2, nrow = 1, labels = c("", "b"))
+
+Cairo(width = 2750, height = 4000, type = "pdf", file = file.path(fig4Dir, "fig4.pdf"), bg = "white", units = "px", dpi = 120)
+plot_grid(fig4)
+dev.off()
+
+Cairo(width = 2000, height = 3000, type = "png", file = file.path(fig4Dir, "fig4.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(fig4)
+dev.off()
+```
+
+Figure 5 Integration of the differential methylation analyses. (A) Plots depicting statistical significance (-(log10(p-value))) for vedolizumab, adalimumab and infliximab. (B) Crossbarplots of the DMPs [names] present in both infliximab and adalimumab. 
+
+```{r Fig5}
+fig5Dir <- file.path(figDir, "fig5")
+dir.create(fig5Dir)
+
+fig5 <- ggarrange(int_dmpplot, ol_cpgs_plot, nrow = 2, ncol = 1, labels = c("a", "b"))
+
+Cairo(file = file.path(fig5Dir, "fig5.pdf"), type = "pdf", units = "px", width = 2400, height = 1600, dpi = 90, bg = "white")
+print(fig5)
+dev.off()
+
+Cairo(file = file.path(fig5Dir, "fig5.png"), type = "png", units = "px", width = 1500, height = 1000, dpi = 90, bg = "white")
+print(fig5)
+dev.off()
+```
+
+```{r FigS1}
+figS1Dir <- file.path(figDir, "figS1")
+dir.create(figS1Dir)
+
+figS1al <- with(T2RvT1R_vedo_top, volcano_plot(effect_sizes = Beta, 
+                                                pvals = P.Value, 
+                                                int_effect_threshold = 0.1, 
+                                                significance = adj.P.Val < 0.05, 
+                                                identifiers = rownames(RvNR_vedo_top)))
+figS1ar <- ggarrange(cpg_strip_plot(cpg_num = rownames(T2RvT1R_vedo_top)[1], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_vedo_top[1, "seqnames"], ":", T2RvT1R_vedo_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_vedo_top)[2], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_vedo_top[2, "seqnames"], ":", T2RvT1R_vedo_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_vedo_top)[3], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_vedo_top[3, "seqnames"], ":", T2RvT1R_vedo_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_vedo_top)[4], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_vedo_top[4, "seqnames"], ":", T2RvT1R_vedo_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+
+figS1bl <- with(T2NRvT1NR_vedo_top, volcano_plot(effect_sizes = Beta, 
+                                                  pvals = P.Value, 
+                                                  int_effect_threshold = 0.1, 
+                                                  significance = adj.P.Val < 0.05, 
+                                                  identifiers = rownames(T2NRvT1NR_vedo_top)))
+figS1br <- ggarrange(cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_vedo_top)[1], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_vedo_top[1, "seqnames"], ":", T2NRvT1NR_vedo_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_vedo_top)[2], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_vedo_top[2, "seqnames"], ":", T2NRvT1NR_vedo_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_vedo_top)[3], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_vedo_top[3, "seqnames"], ":", T2NRvT1NR_vedo_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_vedo_top)[4], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_vedo_top[4, "seqnames"], ":", T2NRvT1NR_vedo_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+figS1cl <- with(TR_vedo_top, volcano_plot(effect_sizes = Beta, 
+                                          pvals = P.Value, 
+                                          int_effect_threshold = 0.1, 
+                                          significance = adj.P.Val < 0.05, 
+                                          identifiers = rownames(TR_vedo_top)))
+figS1cr <- ggarrange(cpg_strip_plot(cpg_num = rownames(TR_vedo_top)[1], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_vedo_top[1, "seqnames"], ":", TR_vedo_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_vedo_top)[2], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_vedo_top[2, "seqnames"], ":", TR_vedo_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_vedo_top)[3], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_vedo_top[3, "seqnames"], ":", TR_vedo_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_vedo_top)[4], betas = betas_vedo, factor_interest = pData(gmset_vedo_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_vedo_top[4, "seqnames"], ":", TR_vedo_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+figS1 <- ggarrange(ggarrange(figS1al, figS1ar, ncol = 2, nrow = 1), 
+                   ggarrange(figS1bl, figS1br, ncol = 2, nrow = 1), 
+                   ggarrange(figS1cl, figS1cr, ncol = 2, nrow = 1), 
+                   nrow = 3, ncol = 1, labels = c("a", "b", "c"))
+
+Cairo(file = file.path(figS1Dir, "figS1.pdf"), type = "pdf", units = "px", width = 2000, height = 3000, dpi = 90, bg = "white")
+print(figS1)
+dev.off()
+
+Cairo(file = file.path(figS1Dir, "figS1.png"), type = "png", units = "px", width = 1500, height = 2250, dpi = 90, bg = "white")
+print(figS1)
+dev.off()
+```
+
+```{r FigS1 cleaning}
+rm(figS1al, figS1ar, figS1bl, figS1br, figS1cl, figS1cr, figS1)
+gc()
+```
+
+```{r FigS2}
+figS2Dir <- file.path(figDir, "figS2")
+dir.create(figS2Dir)
+
+figS2al <- with(T2RvT1R_ada_top, volcano_plot(effect_sizes = Beta, 
+                                                pvals = P.Value, 
+                                                int_effect_threshold = 0.1, 
+                                                significance = adj.P.Val < 0.05, 
+                                                identifiers = rownames(RvNR_ada_top)))
+figS2ar <- ggarrange(cpg_strip_plot(cpg_num = rownames(T2RvT1R_ada_top)[1], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_ada_top[1, "seqnames"], ":", T2RvT1R_ada_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_ada_top)[2], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_ada_top[2, "seqnames"], ":", T2RvT1R_ada_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_ada_top)[3], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_ada_top[3, "seqnames"], ":", T2RvT1R_ada_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_ada_top)[4], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_ada_top[4, "seqnames"], ":", T2RvT1R_ada_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+
+figS2bl <- with(T2NRvT1NR_ada_top, volcano_plot(effect_sizes = Beta, 
+                                                  pvals = P.Value, 
+                                                  int_effect_threshold = 0.1, 
+                                                  significance = adj.P.Val < 0.05, 
+                                                  identifiers = rownames(T2NRvT1NR_ada_top)))
+figS2br <- ggarrange(cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_ada_top)[1], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_ada_top[1, "seqnames"], ":", T2NRvT1NR_ada_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_ada_top)[2], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_ada_top[2, "seqnames"], ":", T2NRvT1NR_ada_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_ada_top)[3], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_ada_top[3, "seqnames"], ":", T2NRvT1NR_ada_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_ada_top)[4], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_ada_top[4, "seqnames"], ":", T2NRvT1NR_ada_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+figS2cl <- with(TR_ada_top, volcano_plot(effect_sizes = Beta, 
+                                          pvals = P.Value, 
+                                          int_effect_threshold = 0.1, 
+                                          significance = adj.P.Val < 0.05, 
+                                          identifiers = rownames(TR_ada_top)))
+figS2cr <- ggarrange(cpg_strip_plot(cpg_num = rownames(TR_ada_top)[1], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_ada_top[1, "seqnames"], ":", TR_ada_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_ada_top)[2], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_ada_top[2, "seqnames"], ":", TR_ada_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_ada_top)[3], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_ada_top[3, "seqnames"], ":", TR_ada_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_ada_top)[4], betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_ada_top[4, "seqnames"], ":", TR_ada_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+figS2 <- ggarrange(ggarrange(figS2al, figS2ar, ncol = 2, nrow = 1), 
+                   ggarrange(figS2bl, figS2br, ncol = 2, nrow = 1), 
+                   ggarrange(figS2cl, figS2cr, ncol = 2, nrow = 1), 
+                   nrow = 3, ncol = 1, labels = c("a", "b", "c"))
+
+Cairo(file = file.path(figS2Dir, "figS2.pdf"), type = "pdf", units = "px", width = 2000, height = 3000, dpi = 90, bg = "white")
+print(figS2)
+dev.off()
+
+Cairo(file = file.path(figS2Dir, "figS2.png"), type = "png", units = "px", width = 1500, height = 2250, dpi = 90, bg = "white")
+print(figS2)
+dev.off()
+```
+
+```{r FigS2 cleaning}
+rm(figS2al, figS2ar, figS2bl, figS2br, figS2cl, figS2cr, figS2)
+gc()
+```
+
+```{r FigS3}
+figS3Dir <- file.path(figDir, "figS3")
+dir.create(figS3Dir)
+
+figS3al <- with(T2RvT1R_ifx_top, volcano_plot(effect_sizes = Beta, 
+                                                pvals = P.Value, 
+                                                int_effect_threshold = 0.1, 
+                                                significance = adj.P.Val < 0.05, 
+                                                identifiers = rownames(RvNR_ifx_top)))
+figS3ar <- ggarrange(cpg_strip_plot(cpg_num = rownames(T2RvT1R_ifx_top)[1], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_ifx_top[1, "seqnames"], ":", T2RvT1R_ifx_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_ifx_top)[2], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_ifx_top[2, "seqnames"], ":", T2RvT1R_ifx_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_ifx_top)[3], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_ifx_top[3, "seqnames"], ":", T2RvT1R_ifx_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2RvT1R_ifx_top)[4], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2RvT1R_ifx_top[4, "seqnames"], ":", T2RvT1R_ifx_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+
+figS3bl <- with(T2NRvT1NR_ifx_top, volcano_plot(effect_sizes = Beta, 
+                                                  pvals = P.Value, 
+                                                  int_effect_threshold = 0.1, 
+                                                  significance = adj.P.Val < 0.05, 
+                                                  identifiers = rownames(T2NRvT1NR_ifx_top)))
+figS3br <- ggarrange(cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_ifx_top)[1], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_ifx_top[1, "seqnames"], ":", T2NRvT1NR_ifx_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_ifx_top)[2], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_ifx_top[2, "seqnames"], ":", T2NRvT1NR_ifx_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_ifx_top)[3], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_ifx_top[3, "seqnames"], ":", T2NRvT1NR_ifx_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(T2NRvT1NR_ifx_top)[4], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(T2NRvT1NR_ifx_top[4, "seqnames"], ":", T2NRvT1NR_ifx_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+figS3cl <- with(TR_ifx_top, volcano_plot(effect_sizes = Beta, 
+                                          pvals = P.Value, 
+                                          int_effect_threshold = 0.1, 
+                                          significance = adj.P.Val < 0.05, 
+                                          identifiers = rownames(TR_ifx_top)))
+figS3cr <- ggarrange(cpg_strip_plot(cpg_num = rownames(TR_ifx_top)[1], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_ifx_top[1, "seqnames"], ":", TR_ifx_top[1, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_ifx_top)[2], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_ifx_top[2, "seqnames"], ":", TR_ifx_top[2, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_ifx_top)[3], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_ifx_top[3, "seqnames"], ":", TR_ifx_top[3, "start"])),
+                     cpg_strip_plot(cpg_num = rownames(TR_ifx_top)[4], betas = betas_ifx, factor_interest = pData(gmset_ifx_filtered)$resptime, enlarged = F) + labs(subtitle = paste0(TR_ifx_top[4, "seqnames"], ":", TR_ifx_top[4, "start"])), 
+                     nrow = 2, ncol = 2, common.legend = T, legend = "bottom")
+
+figS3 <- ggarrange(ggarrange(figS3al, figS3ar, ncol = 2, nrow = 1), 
+                   ggarrange(figS3bl, figS3br, ncol = 2, nrow = 1), 
+                   ggarrange(figS3cl, figS3cr, ncol = 2, nrow = 1), 
+                   nrow = 3, ncol = 1, labels = c("a", "b", "c"))
+
+Cairo(file = file.path(figS3Dir, "figS3.pdf"), type = "pdf", units = "px", width = 2000, height = 3000, dpi = 90, bg = "white")
+print(figS3)
+dev.off()
+
+Cairo(file = file.path(figS3Dir, "figS3.png"), type = "png", units = "px", width = 1500, height = 2250, dpi = 90, bg = "white")
+print(figS3)
+dev.off()
+```
+
+```{r FigS3 cleaning}
+rm(figS3al, figS3ar, figS3bl, figS3br, figS3cl, figS3cr, figS3)
+gc()
+```
+
+```{r Table S1}
+tableS1 <- list(Vedolizumab = RvNR_vedo_sig,
+                Adalimumab = RvNR_ada_sig,
+                Infliximab = RvNR_ifx_sig)
+
+tableS1 <- lapply(tableS1, function(dmps){
+  dmps <- dmps[, c("logFC", "Beta", "t", "P.Value", "adj.P.Val", "B", "chr", "pos", "UCSC_RefGene_Name", "UCSC_RefGene_Group", "Probe_rs", "Probe_maf", "CpG_rs", "CpG_maf", "SBE_rs", "SBE_maf")]
+  colnames(dmps) <- c("mval_diff", "beta_diff", "tstat", "pval", "pBH", "B", "chr", "pos", "gene", "feature", "probe_rs", "probe_maf", "CpG_rs", "CpG_maf", "sbe_rs", "sbe_maf")
+  return(dmps)
+})
+```
+
+#Sample statistics
+```{r}
+pData(gmset_ada_filtered) %>% data.frame %>% group_by(Response) %>% select(Response) %>% table
+pData(gmset_ifx_filtered) %>% data.frame %>% group_by(Response) %>% select(Response) %>% table
+pData(gmset_vedo_filtered) %>% data.frame %>% group_by(Response) %>% select(Response) %>% table
+```
+
+
+#Interesting DMPs
+Some DMPs were found to be interesting in particular.
+
+```{r Interesting DMPs setup}
+intdmpDir <- file.path(reportDir, "interesting_dmps")
+dir.create(intdmpDir)
+```
+
+```{r Vedolizumab DMPs of interest}
+vedo_sig_int_indexes <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,21,23,24,25,26,27,31,33,34,39,41,48,50,57,72,75)
+vedo_sig_int_df <- RvNR_vedo_sig[vedo_sig_int_indexes, c("Name", "Beta", "P.Value", "adj.P.Val", "B", "seqnames", "start", "Probe_rs", "Probe_maf", "CpG_rs", "CpG_maf", "Forward_Sequence", "UCSC_RefGene_Name", "UCSC_RefGene_Group")]
+colnames(vedo_sig_int_df) <- c("CpG", "beta_difference", "pval", "padj", "B", "chr", "start", "pGV_rs", "pGV_maf", "cGV_rs", "cGV_maf", "template", "gene", "gene_feature")
+
+#RSID
+vedo_sig_int_df$GV_rs <- vedo_sig_int_df$pGV_rs
+vedo_sig_int_df$GV_rs[!is.na(vedo_sig_int_df$cGV_rs)] <- vedo_sig_int_df$cGV_rs[!is.na(vedo_sig_int_df$cGV_rs)]
+#MAF
+vedo_sig_int_df$GV_maf <- vedo_sig_int_df$pGV_maf
+vedo_sig_int_df$GV_maf[!is.na(vedo_sig_int_df$cGV_rs)] <- vedo_sig_int_df$cGV_maf[!is.na(vedo_sig_int_df$cGV_rs)]
+#Probe or CpG
+vedo_sig_int_df$GV_type <- NA
+vedo_sig_int_df$GV_type[!is.na(vedo_sig_int_df$cGV_rs)] <- "cGV"
+vedo_sig_int_df$GV_type[!is.na(vedo_sig_int_df$pGV_rs)] <- "pGV"
+#Coordinates
+vedo_sig_int_gv <- getBM(attributes = c("refsnp_id", "chr_name", "chrom_start", "chrom_end"), 
+                         filters ="snp_filter", 
+                         values = vedo_sig_int_df$GV_rs, 
+                         mart = enssnp_mart)
+
+vedo_sig_int_df <- merge(x = vedo_sig_int_df, y = vedo_sig_int_gv, by.x = "GV_rs", by.y = "refsnp_id", all.x = T)
+colnames(vedo_sig_int_df)[colnames(vedo_sig_int_df) %in% c("chr_name", "chrom_start", "chrom_end")] <- c("GV_chr", "GV_start", "GV_end")
+vedo_sig_int_df <- vedo_sig_int_df[,!colnames(vedo_sig_int_df) %in% c("pGV_rs", "pGV_maf", "cGV_rs", "cGV_maf")]
+vedo_sig_int_df <- vedo_sig_int_df[order(vedo_sig_int_df$padj),]
+vedo_sig_int_df <- vedo_sig_int_df[, c("CpG", "beta_difference", "pval", "padj", "B", "chr", "start", "template", "gene", "gene_feature", "GV_rs", "GV_maf", "GV_type", "GV_chr", "GV_start", "GV_end")]
+
+#Difference in 0 or 1 as start
+vedo_sig_int_df$GV_start <- vedo_sig_int_df$GV_start-1
+vedo_sig_int_df$GV_start <- vedo_sig_int_df$GV_end-1
+
+#Means and standard errors per group
+betas_vedo_melt <- reshape2::melt(betas_vedo[vedo_sig_int_df$CpG,], varnames = c("CpG", "ID"), value.name = "Beta")
+
+pData(gmset_vedo_filtered)$ID <- rownames(pData(gmset_vedo_filtered))
+betas_vedo_melt <- merge(betas_vedo_melt, pData(gmset_vedo_filtered)[, c("ID", "resptime")], by = "ID")
+betas_vedo_melt <- tibble(ID = betas_vedo_melt$ID,
+                          CpG = betas_vedo_melt$CpG,
+                          Beta = betas_vedo_melt$Beta,
+                          Resptime = betas_vedo_melt$resptime)
+
+betas_vedo_melt <- betas_vedo_melt %>% 
+  group_by(CpG, Resptime) %>%
+  summarise(Beta_mean = mean(Beta),
+            Beta_stderr = sd(Beta)/sqrt(n()),
+            N = n())
+               
+betas_vedo_summarized <- merge(reshape2::dcast(data = betas_vedo_melt, formula = CpG~Resptime, value.var = "Beta_mean") %>%
+  rename(Mean_NR_T1 = Nonresponder_T1,
+         Mean_NR_T2 = Nonresponder_T2,
+         Mean_R_T1 = Responder_T1,
+         Mean_R_T2 = Responder_T2),
+reshape2::dcast(data = betas_vedo_melt, formula = CpG~Resptime, value.var = "Beta_stderr") %>%
+  rename(SE_NR_T1 = Nonresponder_T1,
+         SE_NR_T2 = Nonresponder_T2,
+         SE_R_T1 = Responder_T1,
+         SE_R_T2 = Responder_T2)) %>%
+  select(CpG,
+         Mean_NR_T1, SE_NR_T1, 
+         Mean_NR_T2, SE_NR_T2,
+         Mean_R_T1, SE_R_T1,
+         Mean_R_T2, SE_R_T2)
+
+vedo_sig_int_df <- merge(vedo_sig_int_df, betas_vedo_summarized)
+
+write.csv(vedo_sig_int_df, file.path(intdmpDir, "RvNR_vedolizumab_interesting_DMPs.csv"))
+
+#Visualization
+intvedorvnrDir <- file.path(intdmpDir, "vedolizumab_dmps")
+dir.create(intvedorvnrDir)
+
+for(i in 1:nrow(vedo_sig_int_df)){
+  cpg_num <- as.character(vedo_sig_int_df$CpG[i])
+  
+  stitle <- paste0(vedo_sig_int_df$chr[i], ":", RvNR_vedo_top$start[i])
+  
+  if(!is.na(vedo_sig_int_df$GV_type[i])){
+    stitle <- paste0(stitle, " ", vedo_sig_int_df$GV_type[i], ": ", vedo_sig_int_df$GV_rs[i], " (MAF:", vedo_sig_int_df$GV_maf[i], ")")
+  } 
+  
+  Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(intvedorvnrDir, paste0(i, "_", cpg_num, ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_vedo, 
+                              factor_interest = pData(gmset_vedo_filtered)$resptime, 
+                              legend = F, 
+                              colors = c(Nonresponder_T1 = "white", Nonresponder_T2 = "white", Responder_T1 = "white", Responder_T2 = "white")) + 
+          labs(subtitle = stitle) +
+          theme(text = element_text(size=11),
+                axis.text.x = element_text(size=11),
+                axis.title.x = element_text(size=11),
+                axis.text.y = element_text(size=11),
+                axis.title.y = element_text(size=11)))
+  dev.off()
+  
+  Cairo(width = 500, height = 500, type = "png", file = file.path(intvedorvnrDir, paste0(i, "_", cpg_num, ".png")), bg = "white", units = "px")
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_vedo, 
+                              factor_interest = pData(gmset_vedo_filtered)$resptime, 
+                              legend = F, 
+                              colors = c(Nonresponder_T1 = "white", Nonresponder_T2 = "white", Responder_T1 = "white", Responder_T2 = "white")) + 
+          labs(subtitle = stitle) +
+          theme(text = element_text(size=20),
+                axis.text.x = element_text(size=20),
+                axis.title.x = element_text(size=20),
+                axis.text.y = element_text(size=20),
+                axis.title.y = element_text(size=20)))
+  dev.off()
+}
+```
+
+```{r Adalimumab DMPs of interest}
+ada_sig_int_indexes <- c(1,2,3,4,5,12,15,24,28,34,35,38,43,48,57,59,70,89,105,107,108,110,111,120,124,133,134,158,167,183,185,190,194,199,200,208,218)
+ada_sig_int_df <- RvNR_ada_sig[ada_sig_int_indexes, c("Name", "Beta", "P.Value", "adj.P.Val", "B", "seqnames", "start", "Probe_rs", "Probe_maf", "CpG_rs", "CpG_maf", "Forward_Sequence", "UCSC_RefGene_Name", "UCSC_RefGene_Group")]
+colnames(ada_sig_int_df) <- c("CpG", "beta_difference", "pval", "padj", "B", "chr", "start", "pGV_rs", "pGV_maf", "cGV_rs", "cGV_maf", "template", "gene", "gene_feature")
+
+#RSID
+ada_sig_int_df$GV_rs <- ada_sig_int_df$pGV_rs
+ada_sig_int_df$GV_rs[!is.na(ada_sig_int_df$cGV_rs)] <- ada_sig_int_df$cGV_rs[!is.na(ada_sig_int_df$cGV_rs)]
+#MAF
+ada_sig_int_df$GV_maf <- ada_sig_int_df$pGV_maf
+ada_sig_int_df$GV_maf[!is.na(ada_sig_int_df$cGV_rs)] <- ada_sig_int_df$cGV_maf[!is.na(ada_sig_int_df$cGV_rs)]
+#Probe or CpG
+ada_sig_int_df$GV_type <- NA
+ada_sig_int_df$GV_type[!is.na(ada_sig_int_df$cGV_rs)] <- "cGV"
+ada_sig_int_df$GV_type[!is.na(ada_sig_int_df$pGV_rs)] <- "pGV"
+#Coordinates
+ada_sig_int_gv <- getBM(attributes = c("refsnp_id", "chr_name", "chrom_start", "chrom_end"), 
+                         filters ="snp_filter", 
+                         values = ada_sig_int_df$GV_rs, 
+                         mart = enssnp_mart)
+
+ada_sig_int_df <- merge(x = ada_sig_int_df, y = ada_sig_int_gv, by.x = "GV_rs", by.y = "refsnp_id", all.x = T)
+colnames(ada_sig_int_df)[colnames(ada_sig_int_df) %in% c("chr_name", "chrom_start", "chrom_end")] <- c("GV_chr", "GV_start", "GV_end")
+ada_sig_int_df <- ada_sig_int_df[,!colnames(ada_sig_int_df) %in% c("pGV_rs", "pGV_maf", "cGV_rs", "cGV_maf")]
+ada_sig_int_df <- ada_sig_int_df[order(ada_sig_int_df$padj),]
+ada_sig_int_df <- ada_sig_int_df[, c("CpG", "beta_difference", "pval", "padj", "B", "chr", "start", "template", "gene", "gene_feature", "GV_rs", "GV_maf", "GV_type", "GV_chr", "GV_start", "GV_end")]
+
+#Difference in 0 or 1 as start
+ada_sig_int_df$GV_start <- ada_sig_int_df$GV_start-1
+ada_sig_int_df$GV_start <- ada_sig_int_df$GV_end-1
+
+#Means and standard errors per group
+betas_ada_melt <- reshape2::melt(betas_ada[ada_sig_int_df$CpG,], varnames = c("CpG", "ID"), value.name = "Beta")
+
+pData(gmset_ada_filtered)$ID <- rownames(pData(gmset_ada_filtered))
+betas_ada_melt <- merge(betas_ada_melt, pData(gmset_ada_filtered)[, c("ID", "resptime")], by = "ID")
+betas_ada_melt <- tibble(ID = betas_ada_melt$ID,
+                         CpG = betas_ada_melt$CpG,
+                         Beta = betas_ada_melt$Beta,
+                         Resptime = betas_ada_melt$resptime)
+
+betas_ada_melt <- betas_ada_melt %>% 
+  group_by(CpG, Resptime) %>%
+  summarise(Beta_mean = mean(Beta),
+            Beta_stderr = sd(Beta)/sqrt(n()),
+            N = n())
+               
+betas_ada_summarized <- merge(reshape2::dcast(data = betas_ada_melt, formula = CpG~Resptime, value.var = "Beta_mean") %>%
+  rename(Mean_NR_T1 = Nonresponder_T1,
+         Mean_NR_T2 = Nonresponder_T2,
+         Mean_R_T1 = Responder_T1,
+         Mean_R_T2 = Responder_T2),
+reshape2::dcast(data = betas_ada_melt, formula = CpG~Resptime, value.var = "Beta_stderr") %>%
+  rename(SE_NR_T1 = Nonresponder_T1,
+         SE_NR_T2 = Nonresponder_T2,
+         SE_R_T1 = Responder_T1,
+         SE_R_T2 = Responder_T2)) %>%
+  select(CpG,
+         Mean_NR_T1, SE_NR_T1, 
+         Mean_NR_T2, SE_NR_T2,
+         Mean_R_T1, SE_R_T1,
+         Mean_R_T2, SE_R_T2)
+
+ada_sig_int_df <- merge(ada_sig_int_df, betas_ada_summarized)
+
+write.csv(ada_sig_int_df, file.path(intdmpDir, "RvNR_adalimumab_interesting_DMPs.csv"))
+
+#Visualization
+intadarvnrDir <- file.path(intdmpDir, "adalimumab_dmps")
+dir.create(intadarvnrDir)
+
+for(i in 1:nrow(ada_sig_int_df)){
+  cpg_num <- as.character(ada_sig_int_df$CpG[i])
+  
+  stitle <- paste0(ada_sig_int_df$chr[i], ":", RvNR_ada_top$start[i])
+  
+  if(!is.na(ada_sig_int_df$GV_type[i])){
+    stitle <- paste0(stitle, " ", ada_sig_int_df$GV_type[i], ": ", ada_sig_int_df$GV_rs[i], " (MAF:", ada_sig_int_df$GV_maf[i], ")")
+  } 
+  
+  Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(intadarvnrDir, paste0(i, "_", cpg_num, ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_ada, 
+                              factor_interest = pData(gmset_ada_filtered)$resptime, 
+                              legend = F, 
+                              colors = c(Nonresponder_T1 = "white", Nonresponder_T2 = "white", Responder_T1 = "white", Responder_T2 = "white")) + 
+          labs(subtitle = stitle))
+  dev.off()
+  
+  Cairo(width = 500, height = 500, type = "png", file = file.path(intadarvnrDir, paste0(i, "_", cpg_num, ".png")), bg = "white", units = "px")
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_ada, 
+                              factor_interest = pData(gmset_ada_filtered)$resptime, 
+                              legend = F, 
+                              colors = c(Nonresponder_T1 = "white", Nonresponder_T2 = "white", Responder_T1 = "white", Responder_T2 = "white")) + 
+          labs(subtitle = stitle))
+  dev.off()
+}
+```
+
+```{r Infliximab DMPs of interest}
+ifx_sig_int_indexes <- c(1,2,3,4,5,6,7,8,9,10,12,13,14,15,17,18,19,20,21,22,24,25,26,29,31,32,35,36,37,38,39,42,43,44,46,48,49,51,56,57,58,59,60,68,73,74,79,80,81,83,84,91,92,94,96,98,109,129,132,135,144,147,151,152,153,159,160,171,175,177,186,193,198,214,220,223,228,231,235)
+ifx_sig_int_df <- RvNR_ifx_sig[ifx_sig_int_indexes, c("Name", "Beta", "P.Value", "adj.P.Val", "B", "seqnames", "start", "Probe_rs", "Probe_maf", "CpG_rs", "CpG_maf", "Forward_Sequence", "UCSC_RefGene_Name", "UCSC_RefGene_Group")]
+colnames(ifx_sig_int_df) <- c("CpG", "beta_difference", "pval", "padj", "B", "chr", "start", "pGV_rs", "pGV_maf", "cGV_rs", "cGV_maf", "template", "gene", "gene_feature")
+
+#RSID
+ifx_sig_int_df$GV_rs <- ifx_sig_int_df$pGV_rs
+ifx_sig_int_df$GV_rs[!is.na(ifx_sig_int_df$cGV_rs)] <- ifx_sig_int_df$cGV_rs[!is.na(ifx_sig_int_df$cGV_rs)]
+#MAF
+ifx_sig_int_df$GV_maf <- ifx_sig_int_df$pGV_maf
+ifx_sig_int_df$GV_maf[!is.na(ifx_sig_int_df$cGV_rs)] <- ifx_sig_int_df$cGV_maf[!is.na(ifx_sig_int_df$cGV_rs)]
+#Probe or CpG
+ifx_sig_int_df$GV_type <- NA
+ifx_sig_int_df$GV_type[!is.na(ifx_sig_int_df$cGV_rs)] <- "cGV"
+ifx_sig_int_df$GV_type[!is.na(ifx_sig_int_df$pGV_rs)] <- "pGV"
+#Coordinates
+ifx_sig_int_gv <- getBM(attributes = c("refsnp_id", "chr_name", "chrom_start", "chrom_end"), 
+                         filters ="snp_filter", 
+                         values = ifx_sig_int_df$GV_rs, 
+                         mart = enssnp_mart)
+
+ifx_sig_int_df <- merge(x = ifx_sig_int_df, y = ifx_sig_int_gv, by.x = "GV_rs", by.y = "refsnp_id", all.x = T)
+colnames(ifx_sig_int_df)[colnames(ifx_sig_int_df) %in% c("chr_name", "chrom_start", "chrom_end")] <- c("GV_chr", "GV_start", "GV_end")
+ifx_sig_int_df <- ifx_sig_int_df[,!colnames(ifx_sig_int_df) %in% c("pGV_rs", "pGV_maf", "cGV_rs", "cGV_maf")]
+ifx_sig_int_df <- ifx_sig_int_df[order(ifx_sig_int_df$padj),]
+ifx_sig_int_df <- ifx_sig_int_df[, c("CpG", "beta_difference", "pval", "padj", "B", "chr", "start", "template", "gene", "gene_feature", "GV_rs", "GV_maf", "GV_type", "GV_chr", "GV_start", "GV_end")]
+
+#Difference in 0 or 1 as start
+ifx_sig_int_df$GV_start <- ifx_sig_int_df$GV_start-1
+ifx_sig_int_df$GV_start <- ifx_sig_int_df$GV_end-1
+
+#Means and standard errors per group
+betas_ifx_melt <- reshape2::melt(betas_ifx[ifx_sig_int_df$CpG,], varnames = c("CpG", "ID"), value.name = "Beta")
+
+pData(gmset_ifx_filtered)$ID <- rownames(pData(gmset_ifx_filtered))
+betas_ifx_melt <- merge(betas_ifx_melt, pData(gmset_ifx_filtered)[, c("ID", "resptime")], by = "ID")
+betas_ifx_melt <- tibble(ID = betas_ifx_melt$ID,
+                         CpG = betas_ifx_melt$CpG,
+                         Beta = betas_ifx_melt$Beta,
+                         Resptime = betas_ifx_melt$resptime)
+
+betas_ifx_melt <- betas_ifx_melt %>% 
+  group_by(CpG, Resptime) %>%
+  summarise(Beta_mean = mean(Beta),
+            Beta_stderr = sd(Beta)/sqrt(n()),
+            N = n())
+               
+betas_ifx_summarized <- merge(reshape2::dcast(data = betas_ifx_melt, formula = CpG~Resptime, value.var = "Beta_mean") %>%
+  rename(Mean_NR_T1 = Nonresponder_T1,
+         Mean_NR_T2 = Nonresponder_T2,
+         Mean_R_T1 = Responder_T1,
+         Mean_R_T2 = Responder_T2),
+reshape2::dcast(data = betas_ifx_melt, formula = CpG~Resptime, value.var = "Beta_stderr") %>%
+  rename(SE_NR_T1 = Nonresponder_T1,
+         SE_NR_T2 = Nonresponder_T2,
+         SE_R_T1 = Responder_T1,
+         SE_R_T2 = Responder_T2)) %>%
+  select(CpG,
+         Mean_NR_T1, SE_NR_T1, 
+         Mean_NR_T2, SE_NR_T2,
+         Mean_R_T1, SE_R_T1,
+         Mean_R_T2, SE_R_T2)
+
+ifx_sig_int_df <- merge(ifx_sig_int_df, betas_ifx_summarized)
+
+write.csv(ifx_sig_int_df, file.path(intdmpDir, "RvNR_infliximab_interesting_DMPs.csv"))
+
+#Visualization
+intifxrvnrDir <- file.path(intdmpDir, "infliximab_dmps")
+dir.create(intifxrvnrDir)
+
+for(i in 1:nrow(ifx_sig_int_df)){
+  cpg_num <- as.character(ifx_sig_int_df$CpG[i])
+  
+  stitle <- paste0(ifx_sig_int_df$chr[i], ":", RvNR_ifx_top$start[i])
+  
+  if(!is.na(ifx_sig_int_df$GV_type[i])){
+    stitle <- paste0(stitle, " ", ifx_sig_int_df$GV_type[i], ": ", ifx_sig_int_df$GV_rs[i], " (MAF:", ifx_sig_int_df$GV_maf[i], ")")
+  } 
+  
+  Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(intifxrvnrDir, paste0(i, "_", cpg_num, ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_ifx, 
+                              factor_interest = pData(gmset_ifx_filtered)$resptime, 
+                              legend = F, 
+                              colors = c(Nonresponder_T1 = "white", Nonresponder_T2 = "white", Responder_T1 = "white", Responder_T2 = "white")) + 
+          labs(subtitle = stitle))
+  dev.off()
+  
+  Cairo(width = 500, height = 500, type = "png", file = file.path(intifxrvnrDir, paste0(i, "_", cpg_num, ".png")), bg = "white", units = "px")
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, 
+                              betas = betas_ifx, 
+                              factor_interest = pData(gmset_ifx_filtered)$resptime, 
+                              legend = F, 
+                              colors = c(Nonresponder_T1 = "white", Nonresponder_T2 = "white", Responder_T1 = "white", Responder_T2 = "white")) + 
+          labs(subtitle = stitle))
+  dev.off()
+}
+```
+
+```{r presentation and poster}
+presDir <- file.path(reportDir, "presentation")
+dir.create(presDir)
+
+posterDir <- file.path(reportDir, "poster")
+dir.create(posterDir)
+
+#Fig1
+RvNR_ifx_sig[1,]
+
+cpg_strat_plot <- function(cpg, betas, facet_factor, x_factor, title, subtitle){
+  beta_melt <- reshape2::melt(betas[cpg,])
+  beta_df <- cbind(beta_melt, 
+                   facet_factor, 
+                   x_factor)
+  
+  ggplot(data = beta_df, aes(x = x_factor, y = value)) +
+    stat_summary(fun.data = mean_se, geom = "crossbar", alpha = 0.5) +
+    geom_jitter() +
+    theme_bw() +
+    facet_wrap(~facet_factor) +
+    xlab("") +
+    labs(title = title, subtitle = subtitle) +
+    ylab("% Methylation") +
+    ylim(0,1) +
+    scale_shape_manual(values=(1:nlevels(beta_df$Cohort))%%10) +
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 14, face = "bold"),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size = 14, face = "bold"),
+          legend.text = element_text(size = 12),
+          plot.title = element_text(face = "bold"),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          strip.text.x = element_text(size = 14))
+}
+
+Cairo(width = 500, height = 500, type = "png", file = file.path(presDir, "fig1A_tdmp_ifx.png"), bg = "white", units = "px", dpi = 120)
+cpg_strat_plot(cpg = RvNR_ifx_sig[1,]$Name, betas = betas_ifx, facet_factor = pData(gmset_ifx_filtered)$Response, x_factor = pData(gmset_ifx_filtered)$Timepoint, title = paste0("IFX: ", RvNR_ifx_sig[1,]$Name), subtitle = paste0(RvNR_ifx_sig[1,]$seqnames, ":", RvNR_ifx_sig[1,]$start))
+dev.off()
+
+Cairo(width = 800, height = 800, type = "pdf", file = file.path(posterDir, "fig1A_tdmp_ifx.pdf"), bg = "white", units = "px", dpi = 120)
+cpg_strat_plot(cpg = RvNR_ifx_sig[1,]$Name, betas = betas_ifx, facet_factor = pData(gmset_ifx_filtered)$Response, x_factor = pData(gmset_ifx_filtered)$Timepoint, title = paste0("IFX: ", RvNR_ifx_sig[1,]$Name), subtitle = paste0(RvNR_ifx_sig[1,]$seqnames, ":", RvNR_ifx_sig[1,]$start))
+dev.off()
+
+Cairo(width = 500, height = 500, type = "png", file = file.path(presDir, "fig1B_tdmp_ada.png"), bg = "white", units = "px", dpi = 120)
+cpg_strat_plot(cpg = RvNR_ada_sig[1,]$Name, betas = betas_ada, facet_factor = pData(gmset_ada_filtered)$Response, x_factor = pData(gmset_ada_filtered)$Timepoint, title = paste0("ADA: MYCBP"), subtitle = paste0(RvNR_ada_sig[1,]$seqnames, ":", RvNR_ada_sig[1,]$start))
+dev.off()
+
+Cairo(width = 500, height = 500, type = "png", file = file.path(presDir, "fig1C_tdmp_vedo.png"), bg = "white", units = "px", dpi = 120)
+cpg_strat_plot(cpg = RvNR_vedo_sig[1,]$Name, betas = betas_vedo, facet_factor = pData(gmset_vedo_filtered)$Response, x_factor = pData(gmset_vedo_filtered)$Timepoint, title = paste0("VEDO: ", RvNR_vedo_sig[1,]$GencodeBasicV12_NAME), subtitle = paste0(RvNR_vedo_sig[1,]$seqnames, ":", RvNR_vedo_sig[1,]$start))
+dev.off()
+
+Cairo(width = 800, height = 800, type = "pdf", file = file.path(posterDir, "fig1A_tdmp_vedo.pdf"), bg = "white", units = "px", dpi = 120)
+cpg_strat_plot(cpg = RvNR_vedo_sig[1,]$Name, betas = betas_vedo, facet_factor = pData(gmset_vedo_filtered)$Response, x_factor = pData(gmset_vedo_filtered)$Timepoint, title = paste0("VEDO: ", RvNR_vedo_sig[1,]$GencodeBasicV12_NAME), subtitle = paste0(RvNR_vedo_sig[1,]$seqnames, ":", RvNR_vedo_sig[1,]$start))
+dev.off()
+
+#Ifx
+RvNR_ifx_hm_anno_col_pres <- data.frame(row.names = rownames(pData(gmset_ifx_filtered)),
+                                        Response = pData(gmset_ifx_filtered)$Response)
+
+RvNR_ifx_hm_pres <- grid.grabExpr(pheatmap(mat = betas_ifx[rownames(RvNR_ifx_sig[1:50,]),],
+                                           annotation_col = RvNR_ifx_hm_anno_col_pres,
+                                           breaks = breaksList, 
+                                           show_colnames = F,
+                                           show_rownames = F,
+                                           cutree_cols = 2,
+                                           main = "Infliximab top 50 DMPs"))
+
+Cairo(width = 800, height = 1000, type = "png", file = file.path(presDir, "heatmap_ifx_RvNR_pres.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(RvNR_ifx_hm_pres)
+dev.off()
+
+Cairo(width = 1000, height = 1250, type = "pdf", file = file.path(posterDir, "heatmap_ifx_RvNR_pres.pdf"), bg = "white", units = "px", dpi = 120)
+plot_grid(RvNR_ifx_hm_pres)
+dev.off()
+
+#Ada
+RvNR_ada_hm_anno_col_pres <- data.frame(row.names = rownames(pData(gmset_ada_filtered)),
+                                        Response = pData(gmset_ada_filtered)$Response)
+
+RvNR_ada_hm_pres <- grid.grabExpr(pheatmap(mat = betas_ada[rownames(RvNR_ada_sig[1:75,]),],
+                                           annotation_col = RvNR_ada_hm_anno_col_pres,
+                                           breaks = breaksList, 
+                                           show_colnames = F,
+                                           show_rownames = F,
+                                           cutree_cols = 2,
+                                           main = "Adalimumab top 50"))
+
+Cairo(width = 800, height = 1000, type = "png", file = file.path(presDir, "heatmap_ada_RvNR_pres.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(RvNR_ada_hm_pres)
+dev.off()
+
+#Vedo
+RvNR_vedo_hm_anno_col_pres <- data.frame(row.names = rownames(pData(gmset_vedo_filtered)),
+                                        Response = pData(gmset_vedo_filtered)$Response)
+
+RvNR_vedo_hm_pres <- grid.grabExpr(pheatmap(mat = betas_vedo[rownames(RvNR_vedo_sig[1:50,]),],
+                                           annotation_col = RvNR_vedo_hm_anno_col_pres,
+                                           breaks = breaksList, 
+                                           show_colnames = F,
+                                           show_rownames = F,
+                                           cutree_cols = 2,
+                                           main = "Vedolizumab top 50"))
+
+Cairo(width = 800, height = 1000, type = "png", file = file.path(presDir, "heatmap_vedo_RvNR_pres.png"), bg = "white", units = "px", dpi = 120)
+plot_grid(RvNR_vedo_hm_pres)
+dev.off()
+
+Cairo(width = 1000, height = 1250, type = "pdf", file = file.path(posterDir, "heatmap_vedo_RvNR_pres.pdf"), bg = "white", units = "px", dpi = 120)
+plot_grid(RvNR_vedo_hm_pres)
+dev.off()
+```
+
+```{r NLRP1}
+nlrp1Dir <- file.path(outputDir, "nlrp1")
+dir.create(nlrp1Dir)
+
+#cg11261447
+RvNR_ifx_top["cg11261447",]
+Cairo(width = 800, height = 800, type = "pdf", file = file.path(nlrp1Dir, "ifx_cg11261447.pdf"), bg = "white", units = "px", dpi = 120)
+cpg_strat_plot(cpg = "cg11261447", betas = betas_ifx, facet_factor = pData(gmset_ifx)$Response, x_factor = pData(gmset_ifx)$Timepoint, title = "Infliximab", subtitle = "cg11261447")
+dev.off()
+
+RvNR_ada_top["cg11261447",]
+Cairo(width = 800, height = 800, type = "pdf", file = file.path(nlrp1Dir, "ada_cg11261447.pdf"), bg = "white", units = "px", dpi = 120)
+cpg_strat_plot(cpg = "cg11261447", betas = betas_ada, facet_factor = pData(gmset_ada)$Response, x_factor = pData(gmset_ada)$Timepoint, title = "Adalimumab", subtitle = "cg11261447")
+dev.off()
+
+RvNR_vedo_top["cg11261447",]
+Cairo(width = 800, height = 800, type = "pdf", file = file.path(nlrp1Dir, "vedo_cg11261447.pdf"), bg = "white", units = "px", dpi = 120)
+cpg_strat_plot(cpg = "cg11261447", betas = betas_vedo, facet_factor = pData(gmset_vedo)$Response, x_factor = pData(gmset_vedo)$Timepoint, title = "Vedolizumab", subtitle = "cg11261447")
+dev.off()
+
+#nlrp1
+RvNR_ifx_nlrp1 <- RvNR_ifx_top[grep("(;|^)NLRP1(;|$)", RvNR_ifx_top$GencodeBasicV12_NAME),]
+RvNR_ada_nlrp1 <- RvNR_ada_top[grep("(;|^)NLRP1(;|$)", RvNR_ada_top$GencodeBasicV12_NAME),]
+RvNR_vedo_nlrp1 <- RvNR_vedo_top[grep("(;|^)NLRP1(;|$)", RvNR_vedo_top$GencodeBasicV12_NAME),]
+
+RvNR_nlrp1 <- rbind(RvNR_ifx_nlrp1, RvNR_ada_nlrp1, RvNR_vedo_nlrp1)
+RvNR_nlrp1 <- RvNR_nlrp1[,c("Beta", "P.Value", "adj.P.Val", "start")]
+RvNR_nlrp1$Cohort <- rep(c("IFX", "ADA", "VEDO"), each = nrow(RvNR_ifx_nlrp1))
+RvNR_nlrp1$Significant <- "NS"
+RvNR_nlrp1$Significant[RvNR_nlrp1$adj.P.Val<0.05] <- "Significant"
+
+Cairo(width = 1200, height = 800, type = "pdf", file = file.path(nlrp1Dir, "nlrp1.pdf"), bg = "white", units = "px", dpi = 120)
+ggplot(RvNR_nlrp1, aes(x = start, y = Beta, group = Cohort, col = Cohort)) +
+  geom_hline(yintercept = 0, col = "black") +
+  geom_point(aes(size = -log10(P.Value), alpha = Significant)) +
+  scale_alpha_manual(values = list(NS = 0.25, Significant = 1)) +
+  geom_line() +
+  ylab("% methylation difference") +
+  theme_bw() +
+  labs(title = "NLRP1",
+       subtitle = "chr17:5405118-5489116") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.x=element_blank())
+dev.off()
+```
+

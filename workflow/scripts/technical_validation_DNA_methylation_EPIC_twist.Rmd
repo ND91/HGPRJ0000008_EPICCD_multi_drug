@@ -1,0 +1,19 @@
+---
+title: "Technical validation DNA methylation"
+author: "Andrew Y.F. Li Yim"
+date: '2022-09-20'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(minfi)
+library(bsseq)
+```
+
+```{r import epic}
+
+```
+
+```{r import twist}
+
+```

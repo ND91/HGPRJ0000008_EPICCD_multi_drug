@@ -1,0 +1,306 @@
+---
+title: "DM analyses adalimumab response"
+author: "Andrew Y.F. Li Yim"
+date: "11 November 2017"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+In this report we will perform the differential methylation analyses on responders and non-responders towards the TNF agonist adalimumab.
+
+From 00_Phenosheet_analysis.Rmd we had already found that there was a slight issue with the genders (i.e. we had female responders and non-responders, but no male non-responders).
+
+Import the relevant data
+```{r setup, echo = FALSE}
+source("src/dmr_plot.R")
+require(minfi)
+samplesDir <- file.path("data","samples")
+commondataDir <- file.path("/home", "ayliyim", "archive", "common_data")
+outputDir <- file.path("output","01_DM_analyses_adalimumab")
+dir.create(outputDir)
+
+samplesheet <- read.metharray.sheet(base = samplesDir, pattern = "samplesheet_PRJ0000008_CDMEDRESP_V1.csv")
+samplesheet$Basename <- samplesheet$Path
+
+samplesheet_ada <- samplesheet[samplesheet$Drug == "Adalimumab",]
+
+rgset_ada <- read.metharray.exp(targets = samplesheet_ada)
+pData(rgset_ada)$resptime <- with(pData(rgset_ada), paste0(Response, "_", Timepoint))
+```
+
+```{r Quality control, echo = FALSE}
+edaDir <- file.path(outputDir, "eda")
+dir.create(edaDir)
+
+require(MethylAid)
+methylaid_ada <- summarize(samplesheet_ada)
+visualize(methylaid_ada)
+
+require(shinyMethyl)
+shinymethyl_ada <- shinySummarize(rgset_ada)
+runShinyMethyl(shinymethyl_ada)
+
+require(ewastools)
+ewastools_ada <- read_idats(samplesheet_ada$Basename)
+ewastools_ada_betas <- dont_normalize(ewastools_ada)
+ewastools_ada_snps <- call_genotypes(ewastools_ada_betas[ewastools_ada$manifest[probe_type == 'rs', index], ], learn = F)
+check_snp_agreement(genotypes = ewastools_ada_snps, donor_ids = samplesheet_ada$Donor_ID, sample_ids = samplesheet_ada$Sample_ID)
+```
+
+According to MethylAid, all samples pass the quality control. Preprocessing is performed using the preprocessFunnorm due to its usage of noob for background correction and subsequently the control probes for correction. Additionally, the ewastools package was used to confirm that the samples were obtained from the same origin.
+As the sample pertains peripheral blood, we can utilize the estimateCellCounts function from minfi to see whether we observe any differences in estimated cell populations between the various groups.
+
+```{r Blood cell distribution}
+require("FlowSorted.Blood.EPIC")
+require(ExperimentHub)
+hub <- ExperimentHub()
+FlowSorted.Blood.EPIC <- hub[["EH1136"]]
+
+ada_cellCounts <- estimateCellCounts(rgset_ada, 
+                                     cellTypes = c("CD8T", "CD4T", "NK", "Bcell", "Mono", "Neu"),
+                                     compositeCellType = "Blood",
+                                     processMethod = "auto", 
+                                     probeSelect = "auto",
+                                     referencePlatform = c("IlluminaHumanMethylationEPIC"))
+ada_cellCounts <- data.frame(ada_cellCounts, 
+                             response = pData(rgset_ada)$Response,
+                             timepoint = pData(rgset_ada)$Timepoint,
+                             donor = pData(rgset_ada)$Donor_ID,
+                             array = rownames(ada_cellCounts))
+
+ada_cellCounts_melt <- reshape2::melt(ada_cellCounts, id.vars = c("response", "timepoint", "array", "donor"), value.name = "Proportion")
+
+ada_cellCounts_plot <- ggplot(ada_cellCounts_melt, aes(x = timepoint, y = Proportion, group = donor, col = response)) +
+  #geom_boxplot() +
+  geom_point() +
+  geom_line() +
+  #ylim(0,1) +
+  #facet_wrap(~variable, scales = "free") +
+  facet_wrap(~variable) +
+  ggtitle("Adalimumab") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+Cairo(width = 1000, height = 1000, type = "png", file = file.path(edaDir, "ada_estimatedCellCounts.png"), bg = "white", units = "px", dpi = 120)
+print(ada_cellCounts_plot)
+dev.off()
+```
+
+The next step is to remove probes associated to SNPs (MAF > 0.01), sex chromosomes, and those that are promiscuous.
+
+```{r Preprocessing}
+gmset_ada <- preprocessFunnorm(rgSet = rgset_ada)
+gmset_ada_nosnpcpg <- gmset_ada[with(getSnpInfo(gmset_ada), which(CpG_maf < 0.01 | is.na(CpG_maf))),]
+gmset_ada_nosnpsbe <- gmset_ada_nosnpcpg[with(getSnpInfo(gmset_ada_nosnpcpg), which(SBE_maf < 0.01 | is.na(SBE_maf))),]
+gmset_ada_nosex <- gmset_ada_nosnpsbe[-which(getAnnotation(gmset_ada_nosnpsbe)$chr %in% c("chrX", "chrY")),]
+
+pmprobes <- read.csv(file.path(commondataDir, "IlluminaHumanMethylationBeadChipEPIC", "Non-specific-probes-illuminaEPIC.csv"), stringsAsFactors = F, header = F)[,1]
+gmset_ada_filtered <- gmset_ada_nosex[!names(gmset_ada_nosex) %in% pmprobes,]
+
+betas_ada <- getBeta(gmset_ada_filtered)
+mvals_ada <- getM(gmset_ada_filtered)
+```
+
+```{r Save RDS}
+saveRDS(gmset_ada_filtered, file.path(outputDir, "gmset_ada_filtered.Rds"))
+```
+
+```{r Annotated and predicted sex}
+require(ggplot2)
+require(dplyr)
+require(ggrepel)
+
+pData(gmset_ada) %>% 
+  data.frame %>% 
+  select(Sample_ID, Sex, predictedSex, xMed, yMed) %>%
+  mutate(Sample_label = ifelse(Sex == predictedSex, "", Sample_ID)) %>% 
+  ggplot(aes(x = xMed, y = yMed, col = Sex, label = Sample_label)) +
+  geom_text_repel(show.legend = F) +
+  geom_point(size = 4) +
+  theme_bw() +
+  ggtitle("Sex chromosome probe median intensities") +
+  xlab("chrX") +
+  ylab("chrY") +
+  theme(text = element_text(size=20))
+```
+
+```{r Sample-sample correlation}
+betas_ada_cor <- cor(betas_ada)
+
+require(pheatmap)
+pheatmap(betas_ada_cor)
+```
+
+In general, the correlation is high (>0.975), which suggests that the methylation of all samples is reasonably similar. We expect that samples derived from the same patient would show the highest pairwise correlation, but given that the correlation is already so high, it would not be strange that we might miss some.
+
+```{r PCA}
+require(plotly)
+
+mvals_ada_dm <- mvals_ada - rowMeans(mvals_ada)
+mvals_ada_svd <- svd(t(mvals_ada_dm))
+
+mvals_svd_df <- data.frame(Sample_ID = pData(gmset_ada_filtered)$Sample_ID,
+                           Origin = pData(gmset_ada_filtered)$Donor_ID,
+                           Timepoint = pData(gmset_ada_filtered)$Timepoint,
+                           Response = pData(gmset_ada_filtered)$Response,
+                           Sex = pData(gmset_ada_filtered)$predictedSex,
+                           PC1 = mvals_ada_svd$u[,1],
+                           PC2 = mvals_ada_svd$u[,2])
+
+mvals_svd_plotobj <- ggplot(mvals_svd_df, aes(x = PC1, y = PC2, Label = Sample_ID, Origin = Origin, Timepoint = Timepoint, Response = Response, Sex = Sex)) +
+  geom_point(aes(col = Timepoint, shape = Response)) +
+  theme_bw() +
+  theme(text = element_text(size=20))
+
+ggplotly(mvals_svd_plotobj)
+```
+
+```{r DM analyses preparation}
+require(limma)
+
+design_ada <- model.matrix(~0 + resptime + Sex + Age, data = pData(gmset_ada_filtered))
+colnames(design_ada) <- c("T0_NR", "T14_NR", "T0_R", "T14_R", "Male", "Age")
+mvals_lmfit_ada <- lmFit(mvals_ada, design = design_ada)
+betas_lmfit_ada <- lmFit(betas_ada, design = design_ada)
+
+contrast_mat_ada <- makeContrasts(
+  RvNR = (T0_R+T14_R)/2-(T0_NR+T14_NR)/2,
+  T14vT0 = (T14_R+T14_NR)/2-(T0_R+T0_NR)/2,
+  T14RvT0R = T14_R-T0_R,
+  T14NRvT0NR = T14_NR-T0_NR,
+  TR = (T14_R-T0_R)-(T14_NR-T0_NR),
+  levels = design_ada
+)
+
+mvals_contrastfit_ada <- contrasts.fit(mvals_lmfit_ada, contrast_mat_ada)
+mvals_ebayes_ada <- eBayes(mvals_contrastfit_ada)
+
+betas_contrastfit_ada <- contrasts.fit(betas_lmfit_ada, contrast_mat_ada)
+betas_ebayes_ada <- eBayes(betas_contrastfit_ada)
+```
+
+For the first analyses we will investigate whether we can find any differentially methylated positions (DMPs).
+
+```{r DMP analysis, echo = F}
+adadmpDir <- file.path(outputDir, "dmps")
+dir.create(adadmpDir)
+
+gmset_ada_anno <- getAnnotation(gmset_ada_filtered)
+gmset_ada_anno_gr <- makeGRangesFromDataFrame(gmset_ada_anno, keep.extra.columns = T, seqnames.field = "chr", start.field = "pos", end.field = "pos")
+
+RvNR_ada_top <- topTable(mvals_ebayes_ada, coef = "RvNR", number = "Inf", adjust.method = "BH")
+RvNR_ada_top <- cbind(RvNR_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(RvNR_ada_top), "RvNR"], gmset_ada_anno[rownames(RvNR_ada_top), ])
+T14vT0_ada_top <- topTable(mvals_ebayes_ada, coef = "T14vT0", number = "Inf", adjust.method = "BH")
+T14vT0_ada_top <- cbind(T14vT0_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(T14vT0_ada_top), "T14vT0"], gmset_ada_anno[rownames(T14vT0_ada_top), ])
+T14RvT0R_ada_top <- topTable(mvals_ebayes_ada, coef = "T14RvT0R", number = "Inf", adjust.method = "BH")
+T14RvT0R_ada_top <- cbind(T14RvT0R_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(T14RvT0R_ada_top), "T14RvT0R"], gmset_ada_anno[rownames(T14RvT0R_ada_top), ])
+T14NRvT0NR_ada_top <- topTable(mvals_ebayes_ada, coef = "T14NRvT0NR", number = "Inf", adjust.method = "BH")
+T14NRvT0NR_ada_top <- cbind(T14NRvT0NR_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(T14NRvT0NR_ada_top), "T14NRvT0NR"], gmset_ada_anno[rownames(T14NRvT0NR_ada_top), ])
+TR_ada_top <- topTable(mvals_ebayes_ada, coef = "TR", number = "Inf", adjust.method = "BH")
+TR_ada_top <- cbind(TR_ada_top, Beta = coefficients(betas_ebayes_ada)[rownames(TR_ada_top), "TR"], gmset_ada_anno[rownames(TR_ada_top), ])
+
+write.csv(RvNR_ada_top, file.path(adadmpDir, "RvNR_ada.csv"))
+write.csv(T14vT0_ada_top, file.path(adadmpDir, "T14vT0_ada.csv"))
+write.csv(T14RvT0R_ada_top, file.path(adadmpDir, "T14RvT0R_ada.csv"))
+write.csv(T14NRvT0NR_ada_top, file.path(adadmpDir, "T14NRvT0NR_ada.csv"))
+write.csv(TR_ada_top, file.path(adadmpDir, "TR_ada.csv"))
+
+RvNR_ada_sig <- RvNR_ada_top[RvNR_ada_top$adj.P.Val < 0.05,]
+write.csv(RvNR_ada_sig, file.path(adadmpDir, "RvNR_ada_sig.csv"))
+```
+
+Only the responders vs non-responders comparison appears to have yielded interesting results. However, the top result from T14vT0 and T14RvT0R (cg06743153) appears to show some interesting differences as well, which suggests an interaction between time and response. This is especially evident when comparing the responders at T14 with the responders at T0.
+
+```{r Ada sig DMP enrichment}
+require(missMethyl)
+
+ada_dmp_enrichment <- gometh(rownames(RvNR_ada_sig), all.cpg = NULL, collection = "KEGG", array.type = "EPIC", plot.bias = FALSE, prior.prob = TRUE)
+ada_dmp_enrichment <- ada_dmp_enrichment[order(ada_dmp_enrichment$P.DE),]
+write.csv(ada_dmp_enrichment, file.path(adadmpDir, "ada_dmp_enrichment.csv"))
+```
+
+```{r Plot the top 10 RvNR}
+require(Cairo)
+
+adarvnrt10Dir <- file.path(adadmpDir, "top10")
+dir.create(adarvnrt10Dir)
+
+for(i in 1:10){
+  cpg_num <- rownames(RvNR_ada_top)[i]
+  
+  Cairo(width = 1000, height = 1000, type = "pdf", file = file.path(adarvnrt10Dir, paste0(i, "_", cpg_num, ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime) + theme(legend.position = "none"))
+  dev.off()
+  
+  Cairo(width = 400, height = 400, type = "png", file = file.path(adarvnrt10Dir, paste0(i, "_", cpg_num, ".png")), bg = "white", units = "px")
+  print(NDlib::cpg_strip_plot(cpg_num = cpg_num, betas = betas_ada, factor_interest = pData(gmset_ada_filtered)$resptime) + theme(legend.position = "none"))
+  dev.off()
+}
+```
+
+```{r cg24051749 surrounding CpGs}
+gmset_ada_anno_gr[(which(names(gmset_ada_anno_gr) == "cg24051749")-2):(which(names(gmset_ada_anno_gr) == "cg24051749")+2),]
+```
+
+```{r cg24051749 region plot}
+print(dmr_plot(dmr_gr = makeGRangesFromDataFrame(df = RvNR_ada_top[4,], seqnames.field = "chr", start.field = "pos", end.field = "pos"),
+               flanks = 500,
+               meth_data = betas_ada, 
+               anno_gr = gmset_ada_anno_gr, 
+               meth_groups = pData(gmset_ada_filtered)$Response, 
+               title = "cg24051749 100bps"))
+```
+
+```{r Genes with multiple adaresp-DMPs}
+adarvnrmdmpsDir <- file.path(adadmpDir, "mdmps")
+dir.create(adarvnrmdmpsDir)
+
+adasig_genes <- do.call(c, lapply(strsplit(x = RvNR_ada_sig$UCSC_RefGene_Name, ";"), unique))
+adasig_genes_freq <- sort(table(adasig_genes))
+adasig_genes_mDMPs <- names(which(adasig_genes_freq > 1))
+
+adasig_genes_mDMPs_min <- do.call(rbind, lapply(adasig_genes_mDMPs, function(i) {
+  df <- RvNR_ada_sig[grep(i, RvNR_ada_sig$UCSC_RefGene_Name),]
+  df_min <- with(df, data.frame(seqnames = unique(chr),
+                                start = min(pos),
+                                end = max(pos),
+                                gene = i))
+  
+  return(df_min)
+}))
+
+adasig_genes_mDMPs_gr <- makeGRangesFromDataFrame(adasig_genes_mDMPs_min, keep.extra.columns = T)
+
+for(i in 1:length(adasig_genes_mDMPs_gr)){
+  Cairo(width = 2000, height = 2000, type = "pdf", file = file.path(adarvnrmdmpsDir, paste0(adasig_genes_mDMPs_gr$gene[i], ".pdf")), bg = "white", units = "px", dpi = 120)
+  print(dmr_plot(dmr_gr = adasig_genes_mDMPs_gr[i], meth_data = betas_ada, anno_gr = gmset_ada_anno_gr, meth_groups = pData(gmset_ada_filtered)$Response, title = as.character(adasig_genes_mDMPs_gr$gene[i])))
+  dev.off()
+  
+    Cairo(width = 500, height = 500, type = "png", file = file.path(adarvnrmdmpsDir, paste0(adasig_genes_mDMPs_gr$gene[i], ".png")), bg = "white", units = "px")
+  print(dmr_plot(dmr_gr = adasig_genes_mDMPs_gr[i], meth_data = betas_ada, anno_gr = gmset_ada_anno_gr, meth_groups = pData(gmset_ada_filtered)$Response, title = as.character(adasig_genes_mDMPs_gr$gene[i])))
+  dev.off()
+}
+```
+
+```{r dmrs}
+adadmrDir <- file.path(outputDir, "dmrs")
+dir.create(adadmrDir)
+
+require(DMRcate)
+dmr_anno_rvnr_ada <- cpg.annotate(object = mvals_ada,
+                                  datatype = "array",
+                                  arraytype = "EPIC",
+                                  what = "M",
+                                  analysis.type = "differential",
+                                  design = design_ada,
+                                  contrasts = T,
+                                  cont.matrix = contrast_mat_ada,
+                                  coef = "RvNR")
+dmr_rvnr_ada <- dmrcate(dmr_anno_rvnr_ada, lambda = 1000, C = 2, min.cpgs = 3, mc.cores = 8, pcutoff = 0.05)
+dmr_rvnr_ada_gr <- extractRanges(dmr_rvnr_ada, genome = "hg19")
+
+write.csv(as.data.frame(dmr_rvnr_ada_gr), file.path(adadmrDir, "dmrs_ada.csv"))
+
+dmr_plot(dmr_gr = dmr_rvnr_ada_gr[6], meth_data = betas_ada, anno_gr = gmset_ada_anno_gr, meth_groups = pData(gmset_ada_filtered)$Response)
+```

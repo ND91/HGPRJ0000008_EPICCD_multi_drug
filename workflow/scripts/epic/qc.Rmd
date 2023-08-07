@@ -1,0 +1,325 @@
+---
+title: "Sample quality control and exploratory data analysis"
+author: "Andrew Y.F. Li Yim"
+date: '2022-09-26'
+output: html_document
+---
+
+The initial steps involve quality control (QC) and exploratory data analysis (EDA). The operations outlined in this notebook will be largely performed on raw or non-normalized data to understand whether samples need to be removed. The goal of the QC is to identify whether samples match their provided metadata. The goal of EDA is to understand where particular sources of variation might come from.
+
+```{r setup, include=FALSE}
+# Install ewastools
+if(!"ewastools" %in% rownames(installed.packages())){
+  devtools::install_github("hhhh5/ewastools")
+}
+
+require(minfi)
+require(dplyr)
+require(shinyMethyl)
+require(ggplot2)
+#require(ggrepel)
+require(wateRmelon)
+require(ExperimentHub)
+require(ewastools)
+require(pheatmap)
+require(broom)
+require(patchwork)
+require(IlluminaHumanMethylationEPICmanifest)
+```
+
+```{r import}
+#rgset <- readRDS(params$rgset_rds)
+rgset <- readRDS("/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/multi_drug/output/epic/import/rgset.Rds")
+```
+
+```{r preparation}
+mset <- minfi::preprocessRaw(rgset)
+gmset <- minfi::mapToGenome(mset)
+```
+
+```{r sample metadata}
+sample_metadata <- minfi::pData(gmset) %>%
+  data.frame()
+```
+
+```{r shinymethyl}
+#rgset_shinysummarize <- shinyMethyl::shinySummarize(rgset)
+#shinyMethyl::runShinyMethyl(rgset_shinysummarize)
+
+# saveRDS(rgset_shinysummarize, "output/epic/rgset_shinyMethylSet.Rds")
+```
+
+Visual inspection indicates no serious problems with the quality control probes.
+
+## Estimated sex discrepancies
+
+```{r predicted sex visualization, fig.width = 5, fig.height = 6}
+sample_metadata <- data.frame(sample_metadata, minfi::getSex(gmset)) %>% 
+  dplyr::mutate(predictedSex = ifelse(predictedSex == "M", "Male", "Female")) 
+
+sample_metadata %>%
+  #dplyr::mutate(label = ifelse(DonorID %in% "F011", SampleID, NA)) %>%
+  ggplot(aes(x = xMed, y = yMed, col = Sex)) +
+  geom_point() +
+  #geom_label_repel(aes(label = label), show.legend = F) +
+  labs(title = "Predicted sex",
+       subtitle = "Median signal allosomes",
+       x = "ChrX",
+       y = "ChrY") +
+  theme_bw() +
+  theme(legend.pos = "bottom")
+```
+
+There appear to be a single discrepancy in the data.
+
+```{r incorrect sex}
+sample_metadata %>%
+  dplyr::filter(Sex != predictedSex) 
+```
+
+Patient F011 is registered as a female, but has a strong signal emanating from chromosome Y. 
+
+```{r Sex discrepancy F011}
+sample_metadata[which(sample_metadata$DonorID == "F011"),]
+```
+
+Intriguingly, other samples from this patient were taken in the infliximab cohort. A subsequent genetic test will need to indicate whether this sample is indeed obtained from the same patient.
+
+Similarly, patient F740 is registered as a male but has no strong signal from chromosome Y.
+
+```{r Sex discrepancy F740}
+sample_metadata[which(sample_metadata$DonorID == "F740"),]
+```
+
+## Estimated age discrepancies
+
+```{r predicted age, fig.width = 10, fig.height = 6}
+agep_horvath <- wateRmelon::agep(mset, method = "horvath")
+
+sample_metadata <- sample_metadata %>%
+  dplyr::mutate(predictedAge = agep_horvath$horvath.age,
+                differenceAge = Age-predictedAge)
+
+age_plot1 <- sample_metadata %>%
+  ggplot(aes(x = Age, y = predictedAge, col = abs(Age-predictedAge))) +
+  geom_abline(intercept = 0, slope = 1) +
+  geom_point() +
+  labs(title = "Predicted age (years)",
+       subtitle = "Horvath's clock",
+       x = "Age",
+       y = "predicted age") +
+  theme_bw() +
+  theme(legend.pos = "bottom")
+
+age_plot2 <- sample_metadata %>%
+  ggplot(aes(differenceAge)) +
+  geom_histogram() +
+  labs(title = "Age discrepancy",
+       x = "Difference in years",
+       y = "Frequency") +
+  theme_bw() +
+  theme(legend.pos = "bottom")
+
+age_plot3 <- sample_metadata %>%
+  ggplot(aes(x = differenceAge, y = "Difference")) +
+  geom_boxplot() +
+  geom_point() +
+  labs(x = "Difference in years") +
+  theme_bw() +
+  theme(legend.pos = "bottom",
+        axis.title.y = element_blank())
+
+age_plot1 + age_plot2/age_plot3
+```
+
+There is one sample that has a very different estimated age relative to its actual age. 
+
+```{r large age discrepancy}
+sample_metadata %>%
+  dplyr::filter(!is.na(differenceAge)) %>%
+  dplyr::arrange(desc(abs(differenceAge))) %>%
+  dplyr::slice_head(n = 5)
+```
+
+The discrepant sample pertains a T1 sample taken from donor F241.
+
+```{r Age discrepancy F241}
+sample_metadata[which(sample_metadata$DonorID == "F241"), c("Age", "predictedAge", "differenceAge")]
+```
+
+Remarkably, this patient provided two samples, one of which does present a reasonable age difference, namely 3.5 years. I suspect that the T1 sample might be incorrect and should be removed.
+
+```{r Age discrepancy F740}
+sample_metadata[which(sample_metadata$DonorID == "F740"), c("Age", "predictedAge", "differenceAge")]
+```
+
+Again, this patient provided two samples, one of which does present a reasonable age difference, namely 2.7 years, but the other presents a more exorbitant difference, namely 20 years. I suspect that the T2 sample might be incorrect and should be removed.
+
+## Estimated blood cell distribution
+
+```{r blood cell distribution, fig.width = 5, fig.height = 6}
+hub <- ExperimentHub()
+FlowSorted.Blood.EPIC <- hub[["EH1136"]]
+
+cellDist <- estimateCellCounts(rgset, 
+                               cellTypes = c("CD8T", "CD4T", "NK", "Bcell", "Mono", "Neu"),
+                               compositeCellType = "Blood",
+                               processMethod = "preprocessNoob", 
+                               probeSelect = "auto",
+                               referencePlatform = c("IlluminaHumanMethylationEPIC"))
+
+sample_metadata <- sample_metadata %>% 
+  dplyr::left_join(cellDist %>%
+                     data.frame() %>%
+                     dplyr::mutate(SampleID = pData(rgset)$SampleID), 
+                   by = "SampleID")
+
+sample_metadata %>%
+  dplyr::select(SampleID, CD8T, CD4T, NK, Bcell, Mono, Neu) %>%
+  tidyr::pivot_longer(-SampleID, names_to = "Celltype", values_to = "Abundance") %>%
+  ggplot(aes(x = Celltype, y = Abundance, col = Celltype)) +
+    geom_boxplot() +
+    geom_point() +  
+    labs(title = "Estimated cellular abundance") +
+    theme_bw() +
+    theme(legend.pos = "bottom",
+        axis.title.x = element_blank())
+```
+
+Evident is that the neutrophil population is most abundant.
+
+## PCA
+
+```{r pca, fig.height = 5, fig.width = 5}
+mvals <- getM(mset)
+mvals <- mvals[-which(abs(mvals) == Inf, arr.ind = T)[,1],]
+mvals <- mvals[-which(is.na(mvals), arr.ind = T)[,1],]
+mvals_dm <- mvals - rowMeans(mvals)
+mvals_svd <- svd(t(mvals_dm))
+mvals_svd_expvar <- round(mvals_svd$d/sum(mvals_svd$d), 2)*100
+
+mvals_svd_df <- data.frame(pData(mset),
+                           PC1 = mvals_svd$u[,1],
+                           PC2 = mvals_svd$u[,2])
+
+ggplot(mvals_svd_df, aes(x = PC1, y = PC2, group = DonorID)) +
+  geom_point(size = 3) +
+  geom_line() +
+  theme_bw() +
+  labs(title = "PCA",
+       x = paste0("PC1 (", mvals_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", mvals_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+We observe three things: 
+1. Samples coming from the same donor do not necessarily lie next to one another.
+2. Samples appear to form two distinct clusters, which is associated with PC2.
+3. Samples appear to separate along the PC1 might be associated with batch effects.
+
+With regard to point 2, this might be related to the different batches that were run, see `DNA_plate`.
+
+```{r pca color_batch, fig.width = 5, fig.height = 6}
+ggplot(mvals_svd_df, aes(x = PC1, y = PC2, group = DonorID, col = DNA_plate)) +
+  geom_point(size = 3) +
+  geom_line() +
+  theme_bw() +
+  labs(title = "PCA",
+       subtitle = "Colored by batch",
+       x = paste0("PC1 (", mvals_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", mvals_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+This appears to separate batch 103415-001 from the rest, which is the initial pilot data from infliximab. Notably, the pilot data from adalimumab does cluster (somewhat) nicely together with the rest. 
+
+The two separate clusters are likely due to sex differences.
+
+```{r pca color_sex, fig.width = 5, fig.height = 6}
+ggplot(mvals_svd_df, aes(x = PC1, y = PC2, group = DonorID, col = Sex)) +
+  geom_point(size = 3) +
+  geom_line() +
+  theme_bw() +
+  labs(title = "PCA",
+       subtitle = "Colored by sex",
+       x = paste0("PC1 (", mvals_svd_expvar[1], "%)"),
+       y = paste0("PC2 (", mvals_svd_expvar[2], "%)")) +
+  theme(text = element_text(size = 12),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank())
+```
+
+Indeed, the two separate clusters are the result of sex.
+
+```{r pairwise correlation, fig.width = 20, fig.height = 20}
+pw_sample_cor <- cor(mvals)
+colnames(pw_sample_cor) <- rownames(pw_sample_cor) <- pData(mset)$SampleID
+
+pw_sample_cor_metadata <- pData(mset) %>%
+  data.frame(., row.names = .$SampleID) %>%
+  dplyr::select(DonorID, DNA_plate)
+
+pheatmap::pheatmap(pw_sample_cor, 
+                   annotation_col = pw_sample_cor_metadata)
+```
+
+I would have honestly expected that samples obtained from the same patient would have clustered better together than that they do now.
+
+```{r pairwise snp check}
+ewastools_object <- ewastools::read_idats(sample_metadata$Basename)
+ewastools_betas <- ewastools::dont_normalize(ewastools_object)
+ewastools_snps <- ewastools::call_genotypes(ewastools_betas[ewastools_object$manifest[probe_type == 'rs', index], ], learn = F)
+(ewastools_sample_agreement <- ewastools::check_snp_agreement(genotypes = ewastools_snps, 
+                                                             donor_ids = sample_metadata$DonorID, 
+                                                             sample_ids = sample_metadata$SampleID))
+```
+
+Indeed, `F011` from the infliximab cohort does not match the `F011` from the ustekinumab cohort. Based on the fact that the `F011` from the ustekinumab cohort does not match the reported sex, I will remove this sample. Similarly, samples from `F241` from the vedolizumab cohort do not match genetically speaking, confirming the discrepant age. Again, as `F241` at T1 was presented the most discrepant age, I will remove this one.
+
+```{r pairwise snp check visualization, fig.width = 17.5, fig.height = 17.5}
+pw_sample_corsnps <- cor(ewastools_betas[ewastools_object$manifest[probe_type == 'rs', index], ], use="complete.obs")
+colnames(pw_sample_corsnps) <- rownames(pw_sample_corsnps) <- sample_metadata$SampleID
+ 
+pheatmap::pheatmap(pw_sample_corsnps, 
+                   annotation_col = pw_sample_cor_metadata)
+```
+
+## Summary
+
+There are four discrepancies that have been observed:
+1. Sample `F011_T1_Ustekinumab` has a strong Y-chromosome signal despite it being estimated to be a female. Based on the genetic variant binding probes, the `F011_T1_Ustekinumab` sample does not match other samples obtained from donor `F011`, suggesting that it is likely an error. Given that `F011` from the Ustekinumab cohort did not match its reported sex, `F011_T1_Ustekinumab` will be removed.
+2. Sample `F241_T1_Vedolizumab` presents a 30 year younger epigenetic age as compared to her actual age, while this discrepancy is absent for the sample taken at T2, namely `F241_T2_Vedolizumab`. Genetic analyses confirm the discrepant genetic variants between the two samples. Accordingly, `F241_T1_Vedolizumab` will be removed.
+3. Sample `F740_T2_Adalimumab` presents a 20 year younger epigenetic age as compared to her actual age, while this discrepancy is absent for the sample taken at T1, namely `F740_T1_Adalimumab`. Genetic analyses confirm the discrepant genetic variants between the two samples. Accordingly, `F740_T1_Adalimumab` will be removed.
+4. The biggest effects that appear visible are the batch effects that are the result of methylation measurement runs, which can be seen when coloring the PCA by `Facility`. This should be corrected for in the model.
+
+```{r append metadata}
+pData(rgset) <- cbind(pData(rgset), sample_metadata[,c("xMed", "yMed", "predictedSex", "predictedAge", "differenceAge", "CD8T", "CD4T", "NK", "Bcell", "Mono", "Neu")])
+```
+
+```{r remove bad samples}
+bad_samples <- sample_metadata %>%
+  dplyr::filter(SampleID %in% c("F011_20170816", "F740_20220420", "F241_20190115") | QC == "Fail")
+rgset_qc <- rgset[,-which(colnames(rgset) %in% bad_samples$SXSPOS)]
+```
+
+```{r save data}
+saveRDS(rgset_qc, file = "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/multi_drug/output/epic/qc/rgset_qc.Rds", compress = "gzip")
+```
+
+```{r save environment}
+save.image("output/epic/qc/global_environment.Rdata")
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
