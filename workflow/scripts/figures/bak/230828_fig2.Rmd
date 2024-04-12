@@ -1,0 +1,295 @@
+---
+title: "fig1"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-09'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(minfi)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(plotROC)
+library(ggrastr)
+library(ggpubr)
+```
+
+```{r paths}
+horaizon_predictions_xlsx <- "config/horaizon/probabilities_VDZ_UST.xlsx"
+horaizon_predictor_probes_xlsx <- "config/horaizon/predictor_cpgs.xlsx"
+
+dmps_vdz_csv <- "output/epic/dmp/dmp_Vedolizumab_annotated.csv"
+dmps_ust_csv <- "output/epic/dmp/dmp_Ustekinumab_annotated.csv"
+
+icc_vdz_csv <- "output/epic/icc/icc_Vedolizumab.csv"
+icc_ust_csv <- "output/epic/icc/icc_Ustekinumab.csv"
+icc_joustra2022_csv <- "resources/joustra2022_icc.csv"
+
+gmset_vdz_rds <- "output/epic/subset/gmset_Vedolizumab.Rds"
+gmset_ust_rds <- "output/epic/subset/gmset_Ustekinumab.Rds"
+```
+
+```{r colors}
+response_cols <- c("R" = "#61ff69",
+                   "NR" = "#ff6961")
+center_colors <- c("AmsterdamUMC" = "#D55E00",
+                   "John Radcliffe Hospital" = "#0072B2")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+horaizon_predictions <- readxl::read_excel(horaizon_predictions_xlsx)
+
+dmps_vdz <- read.csv(dmps_vdz_csv)
+dmps_ust <- read.csv(dmps_ust_csv)
+
+icc_vdz <- read.csv(icc_vdz_csv)
+icc_ust <- read.csv(icc_ust_csv)
+icc_joustra2022 <- read.csv(icc_joustra2022_csv)
+```
+
+```{r dmp merge}
+# VDZ
+predictor_cpgs_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab")
+
+dmps_vdz <- dmps_vdz %>%
+  dplyr::mutate(predictor = ifelse(CGID %in% predictor_cpgs_vdz$CpG, CGID, NA),
+                Drug = "Vedolizumab")
+
+# UST
+predictor_cpgs_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab")
+
+dmps_ust <- dmps_ust %>%
+  dplyr::mutate(predictor = ifelse(CGID %in% predictor_cpgs_ust$CpG, CGID, NA),
+                Drug = "Ustekinumab")
+
+# Combined
+dmps_vdz_ust <- dmps_vdz %>%
+  dplyr::mutate(predictor = ifelse(CGID %in% predictor_cpgs_vdz$CpG, "Predictor", "Non-predictor"),
+                Drug = "Vedolizumab") %>%
+  dplyr::rows_append(dmps_ust %>%
+                       dplyr::mutate(predictor = ifelse(CGID %in% predictor_cpgs_ust$CpG, "Predictor", "Non-predictor"),
+                                     Drug = "Ustekinumab"))
+```
+
+## Figure volcanoplot T2vT1
+
+```{r volcanoplot t2vt1 aumc plot}
+volcanoplot_t2vt1_ggplotobj <- dmps_vdz %>%
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  dplyr::rows_append(dmps_ust %>%
+                       dplyr::mutate(Drug = "Ustekinumab")) %>%
+  dplyr::mutate(predictor = ifelse(CGID %in% predictor_cpgs_ust$CpG, "Predictor", "Non-predictor"),
+                Drug = factor(Drug, levels = c("Vedolizumab", "Ustekinumab"))) %>%
+  ggplot(aes(x = Betadiff_T2vT1, y = -log10(P.Value_T2vT1), col = predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(predictor == "Predictor"),
+                  col = "#000000") +
+  facet_wrap(~Drug, nrow = 1, ncol = 2) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[2]~"(p-value)")) +
+  theme_bw() +
+  theme(legend.pos = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+pdf(width = 14, height = 6, file = volcanoplot_t2vt1_pdf)
+print(volcanoplot_t2vt1_ggplotobj)
+dev.off()
+```
+
+```{r}
+dmps_vdz %>%
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  dplyr::rows_append(dmps_ust %>%
+                       dplyr::mutate(Drug = "Ustekinumab")) %>%
+  dplyr::filter(CGID %in% predictor_cpgs_ust$CpG) %>%
+  dplyr::filter(sign(Betadiff_T1RvNR) != sign(Betadiff_T2RvNR)) %>%
+  dplyr::select(CGID, Drug, Betadiff_T1RvNR, Betadiff_T2RvNR, P.Value_T2vT1) %>%
+  dplyr::mutate(Betadiff_T1RvNR = Betadiff_T1RvNR*100,
+                Betadiff_T2RvNR = Betadiff_T2RvNR*100)
+```
+
+## Figure lineplot
+
+```{r lineplot}
+lineplot_T2vT1_RvNR_ggplotobj <- dmps_vdz %>%
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  dplyr::rows_append(dmps_ust %>%
+                       dplyr::mutate(Drug = "Ustekinumab")) %>%
+  dplyr::filter(CGID %in% predictor_cpgs_ust$CpG) %>%
+  dplyr::select(Betadiff_T1RvNR, Betadiff_T2RvNR, Drug, CGID) %>%
+  tidyr::pivot_longer(-c(CGID, Drug), names_to = "Timepoint", values_to = "Difference_RvNR") %>%
+  dplyr::mutate(Timepoint = gsub(".+_(T[12])RvNR", "\\1", Timepoint),
+                Difference_RvNR = Difference_RvNR*100,
+                Drug = factor(Drug, levels = c("Vedolizumab", "Ustekinumab"))) %>%
+  ggplot(aes(x = Timepoint, y = Difference_RvNR)) +
+  geom_hline(yintercept = 0) +
+  geom_point_rast(col = "#808080") +
+  geom_line(aes(group = CGID), col = "#808080") +
+  facet_wrap(~Drug, nrow = 1, ncol = 2) +
+  labs(y = "Difference %methylation R vs NR") +
+  ylim(-50, 50) +
+  theme_bw() +
+  theme(legend.pos = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 14, height = 5, file = lineplot_T2vT1_RvNR_pdf)
+print(lineplot_T2vT1_RvNR_ggplotobj)
+dev.off()
+```
+
+## Figure scatterplot effect size
+
+```{r scatterplot t1rvnr t2rvnr aumc preparation}
+# VDZ
+predictor_cpg_vdz_stats <- dmps_vdz %>%
+  dplyr::filter(CGID %in% predictor_cpgs_vdz$CpG)
+
+predictor_cpg_vdz_stats_cor <- cor.test(predictor_cpg_vdz_stats$Betadiff_T1RvNR, predictor_cpg_vdz_stats$Betadiff_T2RvNR, method = "spearman")
+
+vdz_plot_boundary <- ceiling(max(abs(dmps_vdz$t_T1RvNR), abs(dmps_vdz$t_T2RvNR)))
+
+# UST
+predictor_cpg_ust_stats <- dmps_ust %>%
+  dplyr::filter(CGID %in% predictor_cpgs_ust$CpG)
+
+predictor_cpg_ust_stats_cor <- cor.test(predictor_cpg_ust_stats$Betadiff_T1RvNR, predictor_cpg_ust_stats$Betadiff_T2RvNR, method = "spearman")
+
+ust_plot_boundary <- ceiling(max(abs(dmps_ust$t_T1RvNR), abs(dmps_ust$t_T2RvNR)))
+
+label_annotation <- data.frame(Drug = c("Vedolizumab", "Ustekinumab"),
+                               rho = c(predictor_cpg_vdz_stats_cor$estimate, predictor_cpg_ust_stats_cor$estimate),
+                               pvalue = c(predictor_cpg_vdz_stats_cor$p.value, predictor_cpg_ust_stats_cor$p.value)) %>%
+  dplyr::mutate(label = paste0(Drug, "\n Spearman rho = ", round(rho, 3), "\n p-value = ", formatC(pvalue, digits = 3, format = "e")),
+                label = factor(label, levels = unique(label)))
+
+```
+
+```{r scatterplot t1rvnr t2rvnr aumc plot}
+scatterplot_T1RvNR_T2RvNR_ggplotobj <- dmps_vdz %>%
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  dplyr::rows_append(dmps_ust %>%
+                       dplyr::mutate(Drug = "Ustekinumab")) %>%
+  dplyr::mutate(predictor = ifelse(CGID %in% c(predictor_cpgs_vdz$CpG, predictor_cpgs_ust$CpG), "Predictor", "Non-predictor"),
+                Betadiff_T1RvNR = Betadiff_T1RvNR*100,
+                Betadiff_T2RvNR = Betadiff_T2RvNR*100) %>%
+  dplyr::left_join(label_annotation, by = "Drug") %>%
+  ggplot(aes(x = Betadiff_T1RvNR, y = Betadiff_T2RvNR)) +
+  # annotate("rect", xmin = 0, xmax = 10, ymin = 0, ymax = 10, alpha = .2, fill = "#AEC6CF") +
+  # annotate("rect", xmin = 0, xmax = -10, ymin = 0, ymax = 10, alpha = .2, fill = "#77DD77") +
+  # annotate("rect", xmin = 0, xmax = 10, ymin = 0, ymax = -10, alpha = .2, fill = "#FFFAA0") +
+  # annotate("rect", xmin = 0, xmax = -10, ymin = 0, ymax = -10, alpha = .2, fill = "#FAA0A0") +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#808080") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(predictor == "Predictor"),
+                  col = "#000000") +
+  geom_smooth(data = . %>%
+                dplyr::filter(predictor == "Predictor"),
+              method=lm) +
+  facet_wrap(~label, nrow = 1) +
+  theme_bw() +
+  labs(x = "Difference %methylation R vs NR at T1",
+       y = "Difference %methylation R vs NR at T2")
+
+pdf(width = 14, height = 7.5, file = scatterplot_T1RvNR_T2RvNR_pdf)
+print(scatterplot_T1RvNR_T2RvNR_ggplotobj)
+dev.off()
+```
+
+## Figure ICC plot
+
+```{r}
+boxplot_icc_ggplotobj <- icc_vdz %>%
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  dplyr::filter(X %in% predictor_cpgs_vdz$CpG) %>%
+  dplyr::rows_append(icc_ust %>%
+                       dplyr::mutate(Drug = "Ustekinumab") %>%
+                       dplyr::filter(X %in% predictor_cpgs_ust$CpG)) %>%
+  dplyr::mutate(Study = "Current study") %>%
+  dplyr::rows_append(icc_joustra2022 %>%
+                       dplyr::filter(Name %in% c(predictor_cpgs_vdz$CpG, predictor_cpgs_ust$CpG)) %>%
+                       dplyr::select(Name, ICC, ICC_lbound, ICC_ubound, ICC_fvalue, ICC_pvalue, ICC_padj) %>%
+                       dplyr::rename(X = Name, 
+                                     icc = ICC, 
+                                     icc_lbound = ICC_lbound, 
+                                     icc_rbound = ICC_ubound, 
+                                     fvalue = ICC_fvalue, 
+                                     pvalue = ICC_pvalue, 
+                                     padj = ICC_padj) %>%
+                       dplyr::mutate(Drug = ifelse(X %in% predictor_cpgs_vdz$CpG, "Vedolizumab", "Ustekinumab"),
+                                     Study = "Joustra et al. 2022")) %>%
+  dplyr::mutate(Study = factor(Study, levels = rev(c("Current study", "Joustra et al. 2022"))),
+                Drug = factor(Drug, levels = c("Vedolizumab", "Ustekinumab"))) %>%
+  ggplot(aes(x = icc, y = Study)) +
+  geom_vline(xintercept = c(0.5, 0.75, 0.9), col = "#d3d3d3", linetype = "dashed") +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point_rast() +
+  facet_wrap(~Drug, nrow = 1) +
+  xlim(0,1) +
+  labs(x = "ICC") +
+  theme_bw() +
+  labs(title = "Temporal stability predictor CpGs") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())
+
+pdf(width = 14, height = 2.25, file = boxplot_icc_pdf)
+print(boxplot_icc_ggplotobj)
+dev.off()
+```
+
+```{r}
+rocplot_t2_aumc_ggplotobj <- horaizon_predictions %>%
+  dplyr::filter(Cohort %in% c("AmsterdamUMC")) %>%
+  dplyr::mutate(Response_coded = ifelse(Response == "R", 1, 0),
+                Drug = factor(Drug, levels = c("Vedolizumab", "Ustekinumab"))) %>% 
+  ggplot(aes(d = Response_coded, m = Prediction, col = Timepoint)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(y = "TPR",
+       x = "FPR") +
+  facet_wrap(~Drug, ncol = 2) +
+  scale_color_manual(values = c("T1" = "#d3d3d3", "T2" = "#000000")) +
+  theme_bw() +
+  theme(legend.pos = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 10, height = 5, file = rocplot_aumc_pdf)
+print(rocplot_t2_aumc_ggplotobj)
+dev.off()
+```
+
+```{r fig2}
+fig2 <- ggarrange(volcanoplot_t2vt1_ggplotobj, 
+                  scatterplot_T1RvNR_T2RvNR_ggplotobj, 
+                  boxplot_icc_ggplotobj, 
+                  rocplot_t2_aumc_ggplotobj,
+                  nrow = 4, 
+                  ncol = 1, 
+                  align = "hv", 
+                  heights = c(1, 1, 0.4, 1),
+                  label = c("A", "B", "C", "D"))
+
+pdf(width = 10, height = 17, file = "fig2.pdf")
+print(fig2)
+dev.off()
+```
+

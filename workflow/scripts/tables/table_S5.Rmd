@@ -1,0 +1,62 @@
+---
+title: "Table S5"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-09'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(minfi)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+dmps_ust_csv <- file.path(basepath, "output/epic/dmp/dmp_Ustekinumab_annotated.csv")
+degs_ust_csv <- file.path(basepath, "output/rnaseq/degs/degs_Ustekinumab.csv")
+```
+
+```{r outpaths}
+tablepath <- file.path(basepath, "output/tables/tableS5")
+dir.create(tablepath)
+
+table_predictorcpggenes_t1_ust_csv <- file.path(tablepath, "table_predictorcpggenes_t1_ust.csv")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+dmps_ust <- read.csv(dmps_ust_csv)
+degs_ust <- read.csv(degs_ust_csv)
+```
+
+```{r preparation}
+predictor_cpgs_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab") %>%
+  dplyr::left_join(dmps_ust, by = c("CpG" = "CGID")) %>%
+  dplyr::mutate(Gene = gsub(";NA", "", paste0(UCSC_RefGene_Name, ";", Enhancer_gene)))
+predictor_genes_ust <- unlist(lapply(strsplit(paste0(predictor_cpgs_ust$UCSC_RefGene_Name, ";", predictor_cpgs_ust$Enhancer_gene), ";"), unique))
+predictor_genes_ust <- predictor_genes_ust[!predictor_genes_ust %in% c("NA", "")]
+```
+
+## Table predictor CpG-associated genes UST
+
+```{r table predictorcpgs t1 ust}
+predictor_degs_ust <- degs_ust %>%
+  dplyr::select(ENSG, HGNC, log2FoldChange_T1RvNR, pvalue_T1RvNR) %>%
+  dplyr::filter(HGNC %in% predictor_genes_ust) %>%
+  readr::write_csv(table_predictorcpggenes_t1_ust_csv)
+```
+
+## sessionInfo
+
+```{r sessionInfo}
+sessionInfo()
+```

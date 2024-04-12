@@ -1,0 +1,16 @@
+channels:
+  - bioconda      
+  - conda-forge
+  - anaconda
+  - defaults
+  - r
+dependencies:
+  - r-biocmanager
+  - r-tidyverse
+  - r-devtools
+  - bioconductor-minfi
+  - bioconductor-txdb.hsapiens.ucsc.hg19.knowngene
+  - bioconductor-org.hs.eg.db
+  - bioconductor-illuminahumanmethylationepicmanifest
+  - bioconductor-illuminahumanmethylationepicanno.ilm10b4.hg19
+  - bioconductor-chippeakanno

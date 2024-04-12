@@ -13,23 +13,44 @@ if(!"ewastools" %in% rownames(installed.packages())){
   devtools::install_github("hhhh5/ewastools")
 }
 
-require(minfi)
-require(dplyr)
-require(shinyMethyl)
-require(ggplot2)
-#require(ggrepel)
-require(wateRmelon)
-require(ExperimentHub)
-require(ewastools)
-require(pheatmap)
-require(broom)
-require(patchwork)
-require(IlluminaHumanMethylationEPICmanifest)
+# Install the lumi package for wateRmelon
+if(!"lumi" %in% rownames(installed.packages())){
+  BiocManager::install("wateRmelon")
+} 
+
+if(!"ExperimentHub" %in% rownames(installed.packages())){
+  BiocManager::install("ExperimentHub")
+} 
+
+if(!"pheatmap" %in% rownames(installed.packages())){
+  BiocManager::install("pheatmap")
+} 
+
+if(!"broom" %in% rownames(installed.packages())){
+  BiocManager::install("broom")
+} 
+
+if(!"patchwork" %in% rownames(installed.packages())){
+  BiocManager::install("patchwork")
+} 
+
+library(minfi)
+library(dplyr)
+# library(shinyMethyl)
+library(ggplot2)
+#library(ggrepel)
+library(wateRmelon)
+library(ExperimentHub)
+library(ewastools)
+library(pheatmap)
+library(broom)
+library(patchwork)
+library(IlluminaHumanMethylationEPICmanifest)
 ```
 
 ```{r import}
 #rgset <- readRDS(params$rgset_rds)
-rgset <- readRDS("/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/multi_drug/output/epic/import/rgset.Rds")
+rgset <- readRDS("/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam/output/epic/import/rgset.Rds")
 ```
 
 ```{r preparation}
@@ -67,7 +88,7 @@ sample_metadata %>%
        x = "ChrX",
        y = "ChrY") +
   theme_bw() +
-  theme(legend.pos = "bottom")
+  theme(legend.position = "bottom")
 ```
 
 There appear to be a single discrepancy in the data.
@@ -109,7 +130,7 @@ age_plot1 <- sample_metadata %>%
        x = "Age",
        y = "predicted age") +
   theme_bw() +
-  theme(legend.pos = "bottom")
+  theme(legend.position = "bottom")
 
 age_plot2 <- sample_metadata %>%
   ggplot(aes(differenceAge)) +
@@ -118,7 +139,7 @@ age_plot2 <- sample_metadata %>%
        x = "Difference in years",
        y = "Frequency") +
   theme_bw() +
-  theme(legend.pos = "bottom")
+  theme(legend.position = "bottom")
 
 age_plot3 <- sample_metadata %>%
   ggplot(aes(x = differenceAge, y = "Difference")) +
@@ -126,7 +147,7 @@ age_plot3 <- sample_metadata %>%
   geom_point() +
   labs(x = "Difference in years") +
   theme_bw() +
-  theme(legend.pos = "bottom",
+  theme(legend.position = "bottom",
         axis.title.y = element_blank())
 
 age_plot1 + age_plot2/age_plot3
@@ -182,7 +203,7 @@ sample_metadata %>%
     geom_point() +  
     labs(title = "Estimated cellular abundance") +
     theme_bw() +
-    theme(legend.pos = "bottom",
+    theme(legend.position = "bottom",
         axis.title.x = element_blank())
 ```
 
@@ -313,7 +334,7 @@ rgset_qc <- rgset[,-which(colnames(rgset) %in% bad_samples$SXSPOS)]
 ```
 
 ```{r save data}
-saveRDS(rgset_qc, file = "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/multi_drug/output/epic/qc/rgset_qc.Rds", compress = "gzip")
+saveRDS(rgset_qc, file = "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam/output/epic/qc/rgset_qc.Rds", compress = "gzip")
 ```
 
 ```{r save environment}

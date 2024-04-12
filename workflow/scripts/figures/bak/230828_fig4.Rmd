@@ -1,0 +1,626 @@
+---
+title: "fig3"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-24'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(minfi)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(plotROC)
+library(ggrastr)
+library(ggpubr)
+```
+
+```{r paths}
+horaizon_predictor_probes_xlsx <- "config/horaizon/predictor_cpgs.xlsx"
+horaizon_predictions_xlsx <- "config/horaizon/probabilities_VDZ_UST.xlsx"
+
+dmps_vdz_csv <- "output/epic/dmp/dmp_Vedolizumab_annotated.csv"
+dmps_ust_csv <- "output/epic/dmp/dmp_Ustekinumab_annotated.csv"
+dmps_t1rvnr_vdz_wconfounders_csv <- "output/epic/dmp/vdz_T1RvNR_wconfounders.csv"
+dmps_t1rvnr_ust_wconfounders_csv <- "output/epic/dmp/ust_T1RvNR_wconfounders.csv"
+
+go_vdz_csv <- "output/epic/horaizon/ora/predictor_Vedolizumab_ora_go.csv"
+go_ust_csv <- "output/epic/horaizon/ora/predictor_Ustekinumab_ora_go.csv"
+
+gmset_vdz_rds <- "output/epic/subset/gmset_Vedolizumab.Rds"
+gmset_ust_rds <- "output/epic/subset/gmset_Ustekinumab.Rds"
+
+degs_vdz_t1_RvNR_csv <- "output/rnaseq/degs/degs_Vedolizumab_t1_RvNR.csv"
+degs_vdz_t2_RvNR_csv <- "output/rnaseq/degs/degs_Vedolizumab_t2_RvNR.csv"
+degs_ust_t1_RvNR_csv <- "output/rnaseq/degs/degs_Ustekinumab_t1_RvNR.csv"
+degs_ust_t2_RvNR_csv <- "output/rnaseq/degs/degs_Ustekinumab_t2_RvNR.csv"
+
+rld_vdz_rds <- "output/rnaseq/r/rld_Vedolizumab.Rds"
+rld_ust_rds <- "output/rnaseq/r/rld_Ustekinumab.Rds"
+```
+
+```{r colors}
+response_cols <- c("R" = "#61ff69",
+                   "NR" = "#ff6961")
+center_colors <- c("AmsterdamUMC" = "#D55E00",
+                   "John Radcliffe Hospital" = "#0072B2")
+```
+
+```{r functions}
+deg_summaryplot <- function(ensgv, counts, response, timepoint, deg_results){
+  
+  deg_subset <- deg_results %>%
+    dplyr::filter(ENSGv == ensgv) %>%
+    dplyr::select(pvalue, padj, ENSG, HGNC, Timepoint)
+  
+  counts_df <- data.frame(Expr = counts[ensgv,], 
+                          Response = response, 
+                          Timepoint = timepoint) %>%
+    dplyr::left_join(deg_subset, by = c("Timepoint")) %>%
+    #dplyr::mutate(label = paste0(Timepoint, "\np-value = ", formatC(pvalue, format = "e", digits = 3)))
+    dplyr::mutate(label = paste0(Timepoint, "\np-value = ", round(pvalue, 3)))
+  
+  ggplotobj <- ggplot(counts_df, aes(x = Response, y = Expr)) +
+    geom_boxplot(col = "black") +
+    geom_point(aes(col = Response), size = 2) +
+    facet_wrap(~label, nrow = 1) +
+    labs(title = unique(deg_subset$HGNC),
+         subtitle = "Gene expression",
+         x = "Response",
+         y = bquote(log[2]~"(expression)")) +
+    scale_color_manual(values = c(R = "#61ff69", NR = "#ff6961")) +
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          text = element_text(size = 12))
+  
+  return(ggplotobj)
+}
+
+dmp_summaryplot <- function(cgid, betas, response, timepoint, dmp_results){
+  
+  dmp_subset <- dmp_results %>%
+    dplyr::filter(CGID == cgid) %>%
+    dplyr::select(P.Value_T1RvNR) %>%
+    dplyr::mutate(CGID = cgid,
+                  Timepoint = "T1") %>%
+    dplyr::rename(pvalue = P.Value_T1RvNR) %>%
+    dplyr::rows_append(dmp_results %>%
+                         dplyr::filter(CGID == cgid) %>%
+                         dplyr::select(P.Value_T2RvNR) %>%
+                         dplyr::mutate(CGID = cgid,
+                                       Timepoint = "T2") %>%
+                         dplyr::rename(pvalue = P.Value_T2RvNR))
+  
+  betas_df <- data.frame(Methylation = betas[cgid,], 
+                         Response = response, 
+                         Timepoint = timepoint) %>%
+    dplyr::left_join(dmp_subset, by = c("Timepoint")) %>%
+    #dplyr::mutate(label = paste0(Timepoint, "\np-value = ", formatC(pvalue, format = "e", digits = 3)))
+    dplyr::mutate(label = paste0(Timepoint, "\np-value = ", round(pvalue, 3)))
+  
+  ggplotobj <- ggplot(betas_df, aes(x = Response, y = Methylation)) +
+    geom_boxplot(col = "black") +
+    geom_point(aes(col = Response), size = 2) +
+    facet_wrap(~label, nrow = 1) +
+    labs(subtitle = "DNA methylation",
+         x = "Response",
+         y = "%Methylation") +
+    scale_color_manual(values = c(R = "#61ff69", NR = "#ff6961")) +
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          text = element_text(size = 12))
+  
+  return(ggplotobj)
+}
+
+eqtm_plot <- function(cgid, ensgv, rld, gmset, response_col, sample_col, timepoint_col){
+  betas_df <- data.frame(Methylation = getBeta(gmset)[cgid,], 
+                         SampleID = pData(gmset)[,sample_col],
+                         Response = pData(gmset)[,response_col],
+                         Timepoint = pData(gmset)[,timepoint_col])
+  
+  counts_df <- data.frame(Expression = assay(rld)[ensgv,], 
+                          SampleID = colData(rld)[,sample_col],
+                          Response = colData(rld)[,response_col],
+                          Timepoint = colData(rld)[,timepoint_col])
+  
+  eqtm_df <- betas_df %>%
+    dplyr::inner_join(counts_df, by = c("SampleID", "Response", "Timepoint"))
+  
+  # eqtm_df_t1 <- eqtm_df %>%
+  #   dplyr::filter(Timepoint == "T1")
+  # 
+  # eqtm_df_t2 <- eqtm_df %>%
+  #   dplyr::filter(Timepoint == "T2")
+  
+  ggplotobj <- eqtm_df %>%
+    ggplot(aes(x = Methylation, y = Expression)) +
+    labs(title = paste0(ensgv, " (", cgid, ")")) +
+    geom_point(aes(col = Response, shape = Timepoint)) +
+    scale_color_manual(values = c(R = "#61ff69", NR = "#ff6961")) +
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          text = element_text(size = 12))
+  return(ggplotobj)
+}
+```
+
+
+```{r import}
+source("workflow/scripts/epic/functions.r")
+
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+horaizon_predictions <- readxl::read_excel(horaizon_predictions_xlsx)
+
+dmps_vdz <- read.csv(dmps_vdz_csv)
+dmps_ust <- read.csv(dmps_ust_csv)
+
+gmset_vdz <- readRDS(gmset_vdz_rds)
+gmset_ust <- readRDS(gmset_ust_rds)
+
+# go_vdz <- read.csv(go_vdz_csv)
+# go_ust <- read.csv(go_ust_csv)
+
+degs_vdz_t1_RvNR <- read.csv(degs_vdz_t1_RvNR_csv)
+degs_vdz_t2_RvNR <- read.csv(degs_vdz_t2_RvNR_csv)
+degs_ust_t1_RvNR <- read.csv(degs_ust_t1_RvNR_csv)
+degs_ust_t2_RvNR <- read.csv(degs_ust_t2_RvNR_csv)
+
+rld_vdz <- readRDS(rld_vdz_rds)
+rld_ust <- readRDS(rld_ust_rds)
+```
+
+```{r}
+dmps_vdz_gr <- makeGRangesFromDataFrame(dmps_vdz, keep.extra.columns = T, seqnames.field = "chr_hg19", start.field = "pos_hg19", end.field = "pos_hg19", na.rm=T)
+dmps_ust_gr <- makeGRangesFromDataFrame(dmps_ust, keep.extra.columns = T, seqnames.field = "chr_hg19", start.field = "pos_hg19", end.field = "pos_hg19", na.rm=T)
+```
+
+```{r predictor CpG annotate}
+# VDZ
+predictor_cpgs_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab") %>%
+  dplyr::left_join(dmps_vdz, by = c("CpG" = "CGID")) %>%
+  dplyr::mutate(Gene = gsub(";NA", "", paste0(UCSC_RefGene_Name, ";", Enhancer_gene)))
+
+# UST
+predictor_cpgs_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab") %>%
+  dplyr::left_join(dmps_ust, by = c("CpG" = "CGID")) %>%
+  dplyr::mutate(Gene = gsub(";NA", "", paste0(UCSC_RefGene_Name, ";", Enhancer_gene)))
+```
+
+```{r predictor genes}
+vdz_predictor_genes <- unlist(lapply(strsplit(paste0(predictor_cpgs_vdz$UCSC_RefGene_Name, ";", predictor_cpgs_vdz$Enhancer_gene), ";"), unique))
+vdz_predictor_genes <- vdz_predictor_genes[!vdz_predictor_genes %in% c("NA", "")]
+vdz_predictor_ensgv <- degs_vdz_t1_RvNR %>%
+  dplyr::filter(HGNC %in% vdz_predictor_genes) %>%
+  dplyr::pull(ENSGv)
+
+ust_predictor_genes <- unlist(lapply(strsplit(paste0(predictor_cpgs_ust$UCSC_RefGene_Name, ";", predictor_cpgs_ust$Enhancer_gene), ";"), unique))
+ust_predictor_genes <- ust_predictor_genes[!ust_predictor_genes %in% c("NA", "")]
+```
+
+```{r degs VDZ}
+degs_vdz_RvNR <- degs_vdz_t1_RvNR %>%
+  dplyr::select(log2FoldChange, stat, pvalue, padj, ENSG, ENSGv, HGNC) %>%
+  dplyr::rename(t1_rvnr_log2fc = log2FoldChange, t1_rvnr_stat = stat, t1_rvnr_pvalue = pvalue, t1_rvnr_padj = padj) %>%
+  dplyr::full_join(degs_vdz_t2_RvNR %>%
+                     dplyr::select(log2FoldChange, stat, pvalue, padj, ENSG, ENSGv, HGNC) %>%
+                     dplyr::rename(t2_rvnr_log2fc = log2FoldChange, t2_rvnr_stat = stat, t2_rvnr_pvalue = pvalue, t2_rvnr_padj = padj),
+                   by = c("ENSG", "ENSGv", "HGNC")) %>%
+  dplyr::mutate(t2_rvnr_log2fc = ifelse(is.na(t2_rvnr_log2fc), 0, t2_rvnr_log2fc),
+                t2_rvnr_stat = ifelse(is.na(t2_rvnr_stat), 0, t2_rvnr_stat),
+                t2_rvnr_pvalue = ifelse(is.na(t2_rvnr_pvalue), 1, t2_rvnr_pvalue),
+                t2_rvnr_padj = ifelse(is.na(t2_rvnr_padj), 1, t2_rvnr_padj),
+                predictor = factor(ifelse(HGNC %in% vdz_predictor_genes, "Predictor", "NS"), levels = c("Predictor", "NS")),
+                DE_significance = ifelse(t1_rvnr_pvalue <0.05 | t2_rvnr_pvalue <0.05, "Significant", "NS"))
+
+degs_vdz_RvNR_long <- degs_vdz_t1_RvNR %>%
+  dplyr::mutate(Timepoint = "T1") %>%
+  dplyr::rows_append(degs_vdz_t2_RvNR %>%
+                       dplyr::mutate(Timepoint = "T2"))
+
+degs_vdz_RvNR_sig <- degs_vdz_RvNR %>%
+  dplyr::filter(predictor == "Predictor") %>%
+  dplyr::arrange()
+```
+
+```{r fig4A}
+fig4A <- degs_vdz_RvNR %>%
+  ggplot(aes(x = t1_rvnr_stat, y = t2_rvnr_stat)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(predictor == "Predictor"),
+                  aes(col = DE_significance)) +
+  labs(title = "Vedolizumab",
+       subtitle = "Effect size (Wald statistic)",
+       x = "T1",
+       y = "T2") +
+  xlim(-6, 6) +
+  ylim(-6, 6) +
+  theme_bw() +
+  scale_color_manual(values = c("Significant" = "#ff0000", NS = "#000000")) +
+  theme(legend.pos = "bottom",
+        legend.title = element_blank())
+```
+
+```{r fig4B}
+fig4B <- degs_vdz_t1_RvNR %>%
+  dplyr::mutate(Timepoint = "T1") %>%
+  dplyr::rows_append(degs_vdz_t2_RvNR %>%
+                       dplyr::mutate(Timepoint = "T2")) %>%
+  dplyr::filter(HGNC %in% vdz_predictor_genes) %>%
+  dplyr::mutate(Direction = ifelse(stat < 0, "NR", "R"),
+                Significance = ifelse(pvalue<0.05, "Significant", "NS"),
+                HGNC = factor(HGNC, levels = rev(unique(HGNC)))) %>%
+  ggplot(aes(x = Timepoint, y = HGNC)) +
+  geom_point(aes(size = -log10(pvalue), fill = Direction, alpha = Significance, shape = Direction)) +
+  theme_bw() +
+  labs(title = "",
+       subtitle = "") +
+  scale_fill_manual(values = response_cols) +
+  scale_alpha_manual(values = c("Significant" = 1, "NS" = 0.1)) +
+  scale_shape_manual(values = c("NR" = 25, "R" = 24)) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.pos = "bottom")
+```
+
+```{r degs UST}
+degs_ust_RvNR <- degs_ust_t1_RvNR %>%
+  dplyr::select(log2FoldChange, stat, pvalue, padj, ENSG, ENSGv, HGNC) %>%
+  dplyr::rename(t1_rvnr_log2fc = log2FoldChange, t1_rvnr_stat = stat, t1_rvnr_pvalue = pvalue, t1_rvnr_padj = padj) %>%
+  dplyr::full_join(degs_ust_t2_RvNR %>%
+                     dplyr::select(log2FoldChange, stat, pvalue, padj, ENSG, ENSGv, HGNC) %>%
+                     dplyr::rename(t2_rvnr_log2fc = log2FoldChange, t2_rvnr_stat = stat, t2_rvnr_pvalue = pvalue, t2_rvnr_padj = padj),
+                   by = c("ENSG", "ENSGv", "HGNC")) %>%
+  dplyr::mutate(t2_rvnr_log2fc = ifelse(is.na(t2_rvnr_log2fc), 0, t2_rvnr_log2fc),
+                t2_rvnr_stat = ifelse(is.na(t2_rvnr_stat), 0, t2_rvnr_stat),
+                t2_rvnr_pvalue = ifelse(is.na(t2_rvnr_pvalue), 1, t2_rvnr_pvalue),
+                t2_rvnr_padj = ifelse(is.na(t2_rvnr_padj), 1, t2_rvnr_padj),
+                predictor = factor(ifelse(HGNC %in% ust_predictor_genes, "Predictor", "NS"), levels = c("Predictor", "NS")),
+                DE_significance = ifelse(t1_rvnr_pvalue <0.05 | t2_rvnr_pvalue <0.05, "Significant", "NS"))
+
+degs_ust_RvNR_long <- degs_ust_t1_RvNR %>%
+  dplyr::mutate(Timepoint = "T1") %>%
+  dplyr::rows_append(degs_ust_t2_RvNR %>%
+                       dplyr::mutate(Timepoint = "T2"))
+
+degs_ust_RvNR_sig <- degs_ust_RvNR %>%
+  dplyr::filter(predictor == "Predictor") %>%
+  dplyr::arrange()
+```
+
+```{r fig4C}
+fig4C <- degs_ust_RvNR %>%
+  ggplot(aes(x = t1_rvnr_stat, y = t2_rvnr_stat)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(predictor == "Predictor"),
+                  aes(col = DE_significance)) +
+  labs(title = "Ustekinumab",
+       #subtitle = bquote(log[2]~"(fold change)"),
+       subtitle = "Effect size (Wald statistic)",
+       x = "T1",
+       y = "T2") +
+  xlim(-6, 6) +
+  ylim(-6, 6) +
+  theme_bw() +
+  scale_color_manual(values = c("Significant" = "#ff0000", NS = "#000000")) +
+  theme(legend.pos = "bottom",
+        legend.title = element_blank())
+```
+
+```{r fig4D}
+fig4D <- degs_ust_t1_RvNR %>%
+  dplyr::mutate(Timepoint = "T1") %>%
+  dplyr::rows_append(degs_ust_t2_RvNR %>%
+                       dplyr::mutate(Timepoint = "T2")) %>%
+  dplyr::filter(HGNC %in% ust_predictor_genes) %>%
+  dplyr::mutate(Direction = ifelse(stat < 0, "NR", "R"),
+                Significance = ifelse(pvalue<0.05, "Significant", "NS"),
+                HGNC = factor(HGNC, levels = rev(unique(HGNC)))) %>%
+  ggplot(aes(x = Timepoint, y = HGNC)) +
+  geom_point(aes(size = -log10(pvalue), fill = Direction, alpha = Significance, shape = Direction)) +
+  theme_bw() +
+  labs(title = "",
+       subtitle = "") +
+  scale_fill_manual(values = response_cols) +
+  scale_alpha_manual(values = c("Significant" = 1, "NS" = 0.1)) +
+  scale_shape_manual(values = c("NR" = 25, "R" = 24)) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.pos = "bottom")
+```
+
+```{r fig4EF}
+# E
+
+## TULP4
+fig4EF1 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000130338.13", 
+                                     counts = assay(rld_vdz), 
+                                     response = colData(rld_vdz)$VDZ_response, 
+                                     timepoint = colData(rld_vdz)$VDZ_timepoint, 
+                                     deg_results = degs_vdz_RvNR_long),
+                     dmp_summaryplot(cgid = "cg00706914",
+                                     betas = getBeta(gmset_vdz), 
+                                     response = pData(gmset_vdz)$VDZ_response, 
+                                     timepoint = pData(gmset_vdz)$VDZ_timepoint, 
+                                     dmp_results = dmps_vdz),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+## RFPL2
+predictor_cpgs_vdz %>% 
+  dplyr::filter(grepl("RFPL2", Gene)) %>%
+  data.frame()
+
+fig4EF2 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000128253.16", 
+                                     counts = assay(rld_vdz), 
+                                     response = colData(rld_vdz)$VDZ_response, 
+                                     timepoint = colData(rld_vdz)$VDZ_timepoint, 
+                                     deg_results = degs_vdz_RvNR_long),
+                     dmp_summaryplot(cgid = "cg12906381",
+                                     betas = getBeta(gmset_vdz), 
+                                     response = pData(gmset_vdz)$VDZ_response, 
+                                     timepoint = pData(gmset_vdz)$VDZ_timepoint, 
+                                     dmp_results = dmps_vdz),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+## MCM2
+predictor_cpgs_vdz %>% 
+  dplyr::filter(grepl("MCM2", Gene)) %>%
+  data.frame()
+
+fig4EF3 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000073111.14", 
+                                     counts = assay(rld_vdz), 
+                                     response = colData(rld_vdz)$VDZ_response, 
+                                     timepoint = colData(rld_vdz)$VDZ_timepoint, 
+                                     deg_results = degs_vdz_RvNR_long),
+                     dmp_summaryplot(cgid = "cg17764313",
+                                     betas = getBeta(gmset_vdz), 
+                                     response = pData(gmset_vdz)$VDZ_response, 
+                                     timepoint = pData(gmset_vdz)$VDZ_timepoint, 
+                                     dmp_results = dmps_vdz),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+# F
+
+## MRC1 
+predictor_cpgs_ust %>% 
+  dplyr::filter(grepl("MRC1", Gene)) %>%
+  data.frame()
+
+fig4EF4 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000260314.3", 
+                                     counts = assay(rld_ust), 
+                                     response = colData(rld_ust)$UST_response, 
+                                     timepoint = colData(rld_ust)$UST_timepoint, 
+                                     deg_results = degs_ust_RvNR_long),
+                     dmp_summaryplot(cgid = "cg00876837",
+                                     betas = getBeta(gmset_ust), 
+                                     response = pData(gmset_ust)$UST_response, 
+                                     timepoint = pData(gmset_ust)$UST_timepoint, 
+                                     dmp_results = dmps_ust),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+## TMEM191B
+
+predictor_cpgs_ust %>% 
+  dplyr::filter(grepl("TMEM191B", Gene)) %>%
+  data.frame()
+
+fig4EF5 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000278558.5", 
+                                     counts = assay(rld_ust), 
+                                     response = colData(rld_ust)$UST_response, 
+                                     timepoint = colData(rld_ust)$UST_timepoint, 
+                                     deg_results = degs_ust_RvNR_long),
+                     dmp_summaryplot(cgid = "cg13982436",
+                                     betas = getBeta(gmset_ust), 
+                                     response = pData(gmset_ust)$UST_response, 
+                                     timepoint = pData(gmset_ust)$UST_timepoint, 
+                                     dmp_results = dmps_ust),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+## LRRC8B 
+
+predictor_cpgs_ust %>% 
+  dplyr::filter(grepl("LRRC8B", Gene)) %>%
+  data.frame()
+
+fig4EF6 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000197147.15", 
+                                     counts = assay(rld_ust), 
+                                     response = colData(rld_ust)$UST_response, 
+                                     timepoint = colData(rld_ust)$UST_timepoint, 
+                                     deg_results = degs_ust_RvNR_long),
+                     dmp_summaryplot(cgid = "cg13816228",
+                                     betas = getBeta(gmset_ust), 
+                                     response = pData(gmset_ust)$UST_response, 
+                                     timepoint = pData(gmset_ust)$UST_timepoint, 
+                                     dmp_results = dmps_ust),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+## HDAC4 
+
+predictor_cpgs_ust %>% 
+  dplyr::filter(grepl("HDAC4", Gene)) %>%
+  data.frame()
+
+fig4EF7 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000068024.18", 
+                                     counts = assay(rld_ust), 
+                                     response = colData(rld_ust)$UST_response, 
+                                     timepoint = colData(rld_ust)$UST_timepoint, 
+                                     deg_results = degs_ust_RvNR_long),
+                     dmp_summaryplot(cgid = "cg20434511",
+                                     betas = getBeta(gmset_ust), 
+                                     response = pData(gmset_ust)$UST_response, 
+                                     timepoint = pData(gmset_ust)$UST_timepoint, 
+                                     dmp_results = dmps_ust),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+## PARP4
+
+predictor_cpgs_ust %>% 
+  dplyr::filter(grepl("PARP4", Gene)) %>%
+  data.frame()
+
+fig4EF8 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000102699.6", 
+                                     counts = assay(rld_ust), 
+                                     response = colData(rld_ust)$UST_response, 
+                                     timepoint = colData(rld_ust)$UST_timepoint, 
+                                     deg_results = degs_ust_RvNR_long),
+                     dmp_summaryplot(cgid = "cg05303293",
+                                     betas = getBeta(gmset_ust), 
+                                     response = pData(gmset_ust)$UST_response, 
+                                     timepoint = pData(gmset_ust)$UST_timepoint, 
+                                     dmp_results = dmps_ust),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+## MARK3 
+
+predictor_cpgs_ust %>% 
+  dplyr::filter(grepl("MARK3", Gene)) %>%
+  data.frame()
+
+fig4EF9 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000075413.19", 
+                                     counts = assay(rld_ust), 
+                                     response = colData(rld_ust)$UST_response, 
+                                     timepoint = colData(rld_ust)$UST_timepoint, 
+                                     deg_results = degs_ust_RvNR_long),
+                     dmp_summaryplot(cgid = "cg06880335",
+                                     betas = getBeta(gmset_ust), 
+                                     response = pData(gmset_ust)$UST_response, 
+                                     timepoint = pData(gmset_ust)$UST_timepoint, 
+                                     dmp_results = dmps_ust),
+                     legend = "bottom", 
+                     common.legend = T,
+                     align = "hv",
+                     nrow = 2,
+                     ncol = 1)
+
+## POTEF 
+
+predictor_cpgs_ust %>% 
+  dplyr::filter(grepl("POTEF", Gene)) %>%
+  data.frame()
+
+fig4EF10 <- ggarrange(deg_summaryplot(ensgv = "ENSG00000196604.13", 
+                                      counts = assay(rld_ust), 
+                                      response = colData(rld_ust)$UST_response, 
+                                      timepoint = colData(rld_ust)$UST_timepoint, 
+                                      deg_results = degs_ust_RvNR_long),
+                      dmp_summaryplot(cgid = "cg09125754",
+                                      betas = getBeta(gmset_ust), 
+                                      response = pData(gmset_ust)$UST_response, 
+                                      timepoint = pData(gmset_ust)$UST_timepoint, 
+                                      dmp_results = dmps_ust),
+                      legend = "bottom", 
+                      common.legend = T,
+                      align = "hv",
+                      nrow = 2,
+                      ncol = 1)
+
+predictor_cpgs_vdz %>% 
+  dplyr::filter(grepl("PIWIL1", Gene)) %>%
+  data.frame()
+
+fig4G <- ggarrange(deg_summaryplot(ensgv = "ENSG00000125207.7", 
+                                      counts = assay(rld_vdz), 
+                                      response = colData(rld_vdz)$VDZ_response, 
+                                      timepoint = colData(rld_vdz)$VDZ_timepoint, 
+                                      deg_results = degs_vdz_RvNR_long),
+                      dmp_summaryplot(cgid = "cg18319102",
+                                      betas = getBeta(gmset_vdz), 
+                                      response = pData(gmset_vdz)$VDZ_response, 
+                                      timepoint = pData(gmset_vdz)$VDZ_timepoint, 
+                                      dmp_results = dmps_vdz),
+                      legend = "bottom", 
+                      common.legend = T,
+                      align = "hv",
+                      nrow = 2,
+                      ncol = 1)
+
+fig4EFG <- ggarrange(fig4EF1, fig4EF2, fig4EF3, fig4EF4, fig4EF5, fig4EF6, fig4EF7, fig4EF8, fig4EF9, fig4EF10, fig4G, 
+                    labels = c("E", "", "", "F", "", "", "", "", "", "", "G", ""),
+                    nrow = 2,
+                    ncol = 6,
+                    common.legend = T, 
+                    legend = "bottom")
+```
+
+```{r fig4}
+fig4AB <- ggarrange(fig4A, fig4B, nrow = 1, ncol = 2, align = "hv", labels = c("A", "B"), widths = c(1, 0.25))
+fig4CD <- ggarrange(fig4C, fig4D, nrow = 1, ncol = 2, align = "hv", labels = c("C", "D"), widths = c(1, 0.25))
+
+fig4ABCD <- ggarrange(fig4AB, fig4CD, nrow = 1)
+fig4 <- ggarrange(fig4ABCD, fig4EFG, nrow = 2, heights = c(1, 1.5))
+
+pdf(width = 17, height = 18.5, file = "fig4.pdf")
+print(fig4)
+dev.off()
+```
+
+```{r dmg mrc1 and mark3}
+dmps_ust_horaizon_gr <- dmps_ust_gr
+dmps_ust_horaizon_gr$Significance <- "NS"
+dmps_ust_horaizon_gr$Significance[dmps_ust_horaizon_gr$CGID %in% (horaizon_predictor_probes %>%
+                                                                    dplyr::filter(Treatment == "Ustekinumab") %>%
+                                                                    dplyr::pull(CpG))] <- "Significant"
+pdf("MRC1_ust_dmgplot.pdf", width = 5, height = 4)
+print(dmg_plot("MRC1", beta_column = "Betadiff_T1RvNR", pval_column = "P.Value_T1RvNR", significance_column = "Significance", tophits_gr = dmps_ust_horaizon_gr, smooth = F))
+dev.off()
+
+pdf("MARK3_ust_dmgplot.pdf", width = 5, height = 4)
+print(dmg_plot("MARK3", beta_column = "Betadiff_T1RvNR", pval_column = "P.Value_T1RvNR", significance_column = "Significance", tophits_gr = dmps_ust_horaizon_gr, smooth = F))
+dev.off()
+```
+

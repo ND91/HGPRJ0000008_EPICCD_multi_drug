@@ -1,0 +1,541 @@
+---
+title: "Figure 3"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-24'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(minfi)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(plotROC)
+library(ggplot2)
+library(ggrastr)
+library(ggpubr)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictions_vdz_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_validation.xlsx")
+horaizon_predictions_ust_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_validation.xlsx")
+
+horaizon_predictions_vdz_confounders_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_confounders.xlsx")
+horaizon_predictions_ust_confounders_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_confounders.xlsx")
+
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+dmps_vdz_csv <- file.path(basepath, "output/epic/dmp/dmp_Vedolizumab_annotated.csv")
+dmps_ust_csv <- file.path(basepath, "output/epic/dmp/dmp_Ustekinumab_annotated.csv")
+
+dmps_vdz_wconfounders_csv <- file.path(basepath, "output/epic/dmp/dmp_T1RvNR_wconfounders_Vedolizumab.csv")
+dmps_ust_wconfounders_csv <- file.path(basepath, "output/epic/dmp/dmp_T1RvNR_wconfounders_Ustekinumab.csv")
+
+sample_metadata_xlsx <- file.path(basepath, "config/samples/sample_metadata.xlsx")
+```
+
+```{r outpaths}
+figpath <- file.path(basepath, "output/figures/fig3")
+dir.create(figpath)
+
+fig_volcanoplot_t1rvnr_vdz_pdf <- file.path(figpath, "fig_volcanoplot_t1rvnr_vdz.pdf")
+fig_volcanoplot_t1rvnr_ust_pdf <- file.path(figpath, "fig_volcanoplot_t1rvnr_ust.pdf")
+fig_volcanoplot_t1rvnr_wconfounders_vdz_pdf <- file.path(figpath, "fig_volcanoplot_t1rvnr_wconfounders_vdz.pdf")
+fig_volcanoplot_t1rvnr_wconfounders_ust_pdf <- file.path(figpath, "fig_volcanoplot_t1rvnr_wconfounders_ust.pdf")
+fig_volcanoplot_t1rvnr_predictor_cpgs_attenuation_vdz_pdf <- file.path(figpath, "fig_volcanoplot_t1rvnr_predictor_cpgs_attenuation_vdz.pdf")
+fig_volcanoplot_t1rvnr_predictor_cpgs_attenuation_ust_pdf <- file.path(figpath, "fig_volcanoplot_t1rvnr_predictor_cpgs_attenuation_ust.pdf")
+fig_boxplot_t1rvnr_predictor_cpgs_attentuation_vdz_pdf <- file.path(figpath, "fig_boxplot_t1rvnr_predictor_cpgs_attenuation_vdz.pdf")
+fig_boxplot_t1rvnr_predictor_cpgs_attentuation_ust_pdf <- file.path(figpath, "fig_boxplot_t1rvnr_predictor_cpgs_attenuation_ust.pdf")
+fig_boxplot_t1rvnr_predictor_cpgs_attentuation_ust_full_pdf <- file.path(figpath, "fig_boxplot_t1rvnr_predictor_cpgs_attenuation_ust_full.pdf")
+fig_dumbbell_t1rvnr_confounders_pvalue_vdz_pdf <- file.path(figpath, "fig_dumbbell_t1rvnr_confounders_pvalue_vdz.pdf")
+fig_dumbbell_t1rvnr_confounders_pvalue_ust_pdf <- file.path(figpath, "fig_dumbbell_t1rvnr_confounders_pvalue_ust.pdf")
+fig_dumbbell_t1rvnr_confounders_betadiff_vdz_pdf <- file.path(figpath, "fig_dumbbell_t1rvnr_confounders_betadiff_vdz.pdf")
+fig_dumbbell_t1rvnr_confounders_betadiff_ust_pdf <- file.path(figpath, "fig_dumbbell_t1rvnr_confounders_betadiff_ust.pdf")
+fig_dumbbell_t1rvnr_confounders_betadiff_pvalue_vdz_ust_pdf <- file.path(figpath, "fig_dumbbell_t1rvnr_confounders_betadiff_pvalue_vdz_ust.pdf")
+fig_rocplot_t1_confounders_vdz_pdf <- file.path(figpath, "fig_rocplot_t1_confounders_vdz.pdf")
+fig_rocplot_t1_confounders_ust_pdf <- file.path(figpath, "fig_rocplot_t1_confounders_ust.pdf")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+dmps_vdz <- read.csv(dmps_vdz_csv)
+dmps_ust <- read.csv(dmps_ust_csv)
+
+dmps_vdz_wconfounders <- read.csv(dmps_vdz_wconfounders_csv)
+dmps_ust_wconfounders <- read.csv(dmps_ust_wconfounders_csv)
+
+horaizon_predictions_vdz_validation <- readxl::read_excel(horaizon_predictions_vdz_validation_xlsx, skip = 1)
+horaizon_predictions_ust_validation <- readxl::read_excel(horaizon_predictions_ust_validation_xlsx, skip = 1)
+
+horaizon_predictions_vdz_confounders <- readxl::read_excel(horaizon_predictions_vdz_confounders_xlsx, skip = 1)
+horaizon_predictions_ust_confounders <- readxl::read_excel(horaizon_predictions_ust_confounders_xlsx, skip = 1)
+
+sample_metadata <- readxl::read_excel(sample_metadata_xlsx)
+```
+
+```{r colors}
+response_cols <- c("R" = "#61FF69",
+                   "NR" = "#FF6961")
+cohort_colors <- c("Discovery" = "#D55E00",
+                   "Validation" = "#0072B2")
+criteria_colors <- c("Partial" = "#CC79A7",
+                     "Full" = "#56B4E9")
+atnf_colors <- c("Exposed" = "#999999",
+                 "Non-exposed" = "#F0E442")
+timepoint_colors <- c("T1" = "#D3D3D3",
+                      "T2" = "#000000")
+model_colors <- c("Uncorrected" = "#D3D3D3",
+                  "Corrected" = "#000000")
+prediction_colors <- c("CpG-model" = "#D3D3D3",
+                       "Confounder-model" = "#0000FF",
+                       "Confounder regressed-model" = "#008800")
+```
+
+```{r predictors preparation}
+predictor_cpgs_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab") %>%
+  dplyr::left_join(dmps_vdz, by = c("CpG" = "CGID"))
+
+predictor_cpgs_limma_confounders_vdz <- rbind(
+  data.frame(
+    CGID = predictor_cpgs_vdz$CpG,
+    pvalue = dmps_vdz[match(predictor_cpgs_vdz$CpG, dmps_vdz$CGID), "P.Value_T1RvNR"],
+    betadiff =  dmps_vdz[match(predictor_cpgs_vdz$CpG, dmps_vdz$CGID), "Betadiff_T1RvNR"]*100,
+    Model = "Uncorrected",
+    treatment = "Vedolizumab"),
+  data.frame(
+    CGID = predictor_cpgs_vdz$CpG,
+    pvalue = dmps_vdz_wconfounders[match(predictor_cpgs_vdz$CpG, dmps_vdz_wconfounders$CGID), "P.Value"],
+    betadiff =  dmps_vdz_wconfounders[match(predictor_cpgs_vdz$CpG, dmps_vdz_wconfounders$CGID), "Betadiff_T1RvNR"]*100,
+    Model = "Corrected",
+    treatment = "Vedolizumab")
+) %>%
+  dplyr::mutate(mlog10_pvalue = -log10(pvalue),
+                Significance = ifelse(pvalue<0.05, "Significant", "NS"))
+
+predictor_cpgs_limma_confounders_vdz_attenuation <- data.frame(
+    CGID = predictor_cpgs_vdz$CpG,
+    pvalue_uncorr = dmps_vdz[match(predictor_cpgs_vdz$CpG, dmps_vdz$CGID), "P.Value_T1RvNR"],
+    betadiff_uncorr =  dmps_vdz[match(predictor_cpgs_vdz$CpG, dmps_vdz$CGID), "Betadiff_T1RvNR"]*100) %>% 
+  dplyr::left_join(data.frame(
+    CGID = predictor_cpgs_vdz$CpG,
+    pvalue_corr = dmps_vdz_wconfounders[match(predictor_cpgs_vdz$CpG, dmps_vdz_wconfounders$CGID), "P.Value"],
+    betadiff_corr =  dmps_vdz_wconfounders[match(predictor_cpgs_vdz$CpG, dmps_vdz_wconfounders$CGID), "Betadiff_T1RvNR"]*100),
+    by = "CGID") %>%
+  dplyr::mutate(attenuation_betadiff = (betadiff_corr-betadiff_uncorr)/betadiff_uncorr)
+
+predictor_cpgs_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab") %>%
+  dplyr::left_join(dmps_ust, by = c("CpG" = "CGID"))
+
+predictor_cpgs_limma_confounders_ust <- rbind(
+  data.frame(
+    CGID = predictor_cpgs_ust$CpG,
+    pvalue = dmps_ust[match(predictor_cpgs_ust$CpG, dmps_ust$CGID), "P.Value_T1RvNR"],
+    betadiff =  dmps_ust[match(predictor_cpgs_ust$CpG, dmps_ust$CGID), "Betadiff_T1RvNR"]*100,
+    Model = "Uncorrected",
+    treatment = "Ustekinumab"),
+  data.frame(
+    CGID = predictor_cpgs_ust$CpG,
+    pvalue = dmps_ust_wconfounders[match(predictor_cpgs_ust$CpG, dmps_ust_wconfounders$CGID), "P.Value"],
+    betadiff = dmps_ust_wconfounders[match(predictor_cpgs_ust$CpG, dmps_ust_wconfounders$CGID), "Betadiff_T1RvNR"]*100,
+    Model = "Corrected",
+    treatment = "Ustekinumab")
+) %>%
+  dplyr::mutate(mlog10_pvalue = -log10(pvalue),
+                Significance = ifelse(pvalue<0.05, "Significant", "NS"))
+
+predictor_cpgs_limma_confounders_ust_attenuation <- data.frame(
+    CGID = predictor_cpgs_ust$CpG,
+    pvalue_uncorr = dmps_ust[match(predictor_cpgs_ust$CpG, dmps_ust$CGID), "P.Value_T1RvNR"],
+    betadiff_uncorr =  dmps_ust[match(predictor_cpgs_ust$CpG, dmps_ust$CGID), "Betadiff_T1RvNR"]*100) %>% 
+  dplyr::left_join(data.frame(
+    CGID = predictor_cpgs_ust$CpG,
+    pvalue_corr = dmps_ust_wconfounders[match(predictor_cpgs_ust$CpG, dmps_ust_wconfounders$CGID), "P.Value"],
+    betadiff_corr =  dmps_ust_wconfounders[match(predictor_cpgs_ust$CpG, dmps_ust_wconfounders$CGID), "Betadiff_T1RvNR"]*100),
+    by = "CGID") %>%
+  dplyr::mutate(attenuation_betadiff = (betadiff_corr-betadiff_uncorr)/betadiff_uncorr)
+```
+
+```{r dmps preparation}
+dmps_vdz_gr <- makeGRangesFromDataFrame(dmps_vdz, keep.extra.columns = T, seqnames.field = "chr_hg19", start.field = "pos_hg19", end.field = "pos_hg19", na.rm=T)
+dmps_ust_gr <- makeGRangesFromDataFrame(dmps_ust, keep.extra.columns = T, seqnames.field = "chr_hg19", start.field = "pos_hg19", end.field = "pos_hg19", na.rm=T)
+```
+
+## Figure volcanoplot T1RvNR
+
+```{r volcanoplot t1rvnr plot}
+volcanoplot_t1rvnr_vdz_ggplotobj <- dmps_vdz %>%
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  dplyr::mutate(predictor = ifelse(CGID %in% predictor_cpgs_vdz$CpG, "Predictor", "Non-predictor"),
+                Drug = factor(Drug, levels = c("Vedolizumab", "Ustekinumab"))) %>%
+  ggplot(aes(x = Betadiff_T1RvNR*100, y = -log10(P.Value_T1RvNR), col = predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(predictor == "Predictor"),
+                  col = "#000000") +
+  facet_wrap(~Drug, nrow = 1, ncol = 1) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_volcanoplot_t1rvnr_vdz_pdf)
+print(volcanoplot_t1rvnr_vdz_ggplotobj)
+dev.off()
+
+volcanoplot_t1rvnr_ust_ggplotobj <- dmps_ust %>%
+  dplyr::mutate(Drug = "Ustekinumab") %>%
+  dplyr::mutate(predictor = ifelse(CGID %in% predictor_cpgs_ust$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_T1RvNR*100, y = -log10(P.Value_T1RvNR), col = predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(predictor == "Predictor"),
+                  col = "#000000") +
+  facet_wrap(~Drug, nrow = 1, ncol = 1) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_volcanoplot_t1rvnr_ust_pdf)
+print(volcanoplot_t1rvnr_ust_ggplotobj)
+dev.off()
+```
+
+## Figure volcanoplot T1RvNR predictor CpGs attenuation of effect
+
+```{r volcanoplot t1rvnr predictor cpgs attentuation plot}
+volcanoplot_t1rvnr_predictor_cpgs_attenuation_vdz_ggplotobj <- dmps_vdz %>%
+  dplyr::mutate(Model = "Uncorrected") %>%
+  dplyr::select(CGID, P.Value_T1RvNR, Betadiff_T1RvNR, Model) %>%
+  dplyr::rows_append(dmps_vdz_wconfounders %>%
+                       dplyr::select(CGID, P.Value, Betadiff_T1RvNR) %>%
+                       dplyr::rename(P.Value_T1RvNR = P.Value) %>%
+                       dplyr::mutate(Model = "Corrected")) %>%
+  dplyr::filter(CGID %in% predictor_cpgs_vdz$CpG) %>%
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  ggplot(aes(x = Betadiff_T1RvNR*100, y = -log10(P.Value_T1RvNR), col = Model)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_line(aes(group = CGID), col = "#d3d3d3", linetype = "dotted") +
+  geom_point_rast() +
+  facet_wrap(~Drug, nrow = 1, ncol = 1) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  ylim(0, 6.5) +
+  scale_color_manual(values = model_colors) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_volcanoplot_t1rvnr_predictor_cpgs_attenuation_vdz_pdf)
+print(volcanoplot_t1rvnr_predictor_cpgs_attenuation_vdz_ggplotobj)
+dev.off()
+
+volcanoplot_t1rvnr_predictor_cpgs_attenuation_ust_ggplotobj <- dmps_ust %>%
+  dplyr::mutate(Model = "Uncorrected") %>%
+  dplyr::select(CGID, P.Value_T1RvNR, Betadiff_T1RvNR, Model) %>%
+  dplyr::rows_append(dmps_ust_wconfounders %>%
+                       dplyr::select(CGID, P.Value, Betadiff_T1RvNR) %>%
+                       dplyr::rename(P.Value_T1RvNR = P.Value) %>%
+                       dplyr::mutate(Model = "Corrected")) %>%
+  dplyr::filter(CGID %in% predictor_cpgs_ust$CpG) %>%
+  dplyr::mutate(Drug = "Ustekinumab") %>%
+  ggplot(aes(x = Betadiff_T1RvNR*100, y = -log10(P.Value_T1RvNR), col = Model)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_line(aes(group = CGID), col = "#d3d3d3", linetype = "dotted") +
+  geom_point_rast() +
+  facet_wrap(~Drug, nrow = 1, ncol = 1) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  ylim(0, 6.5) +
+  scale_color_manual(values = model_colors) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_volcanoplot_t1rvnr_predictor_cpgs_attenuation_ust_pdf)
+print(volcanoplot_t1rvnr_predictor_cpgs_attenuation_ust_ggplotobj)
+dev.off()
+```
+
+## Figure boxplot t1rvnr confounders attenuation of effect size
+
+```{r boxplot t1rvnr predictor cpgs attentuation plot}
+boxplot_t1rvnr_predictor_cpgs_attentuation_vdz_ggplotobj <- predictor_cpgs_limma_confounders_vdz_attenuation %>%
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  ggplot(aes(x = attenuation_betadiff, y = "Attenuation of effect size")) +
+  geom_vline(xintercept = 0) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  theme_bw() +
+  labs(title = "Attenuation of effect size",
+       subtitle = "(Beta_null-Beta_adj)/Beta_null") +
+  facet_wrap(~Drug) +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 2, file = fig_boxplot_t1rvnr_predictor_cpgs_attentuation_vdz_pdf)
+print(boxplot_t1rvnr_predictor_cpgs_attentuation_vdz_ggplotobj)
+dev.off()
+
+boxplot_t1rvnr_predictor_cpgs_attentuation_ust_ggplotobj <- predictor_cpgs_limma_confounders_ust_attenuation %>%
+  dplyr::filter(attenuation_betadiff<10) %>%
+  dplyr::mutate(Drug = "Ustekinumab") %>%
+  ggplot(aes(x = attenuation_betadiff, y = "Attenuation of effect size")) +
+  geom_vline(xintercept = 0) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  theme_bw() +
+  labs(title = "Attenuation of effect size",
+       subtitle = "(Beta_null-Beta_adj)/Beta_null") +
+  facet_wrap(~Drug) +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 2, file = fig_boxplot_t1rvnr_predictor_cpgs_attentuation_ust_pdf)
+print(boxplot_t1rvnr_predictor_cpgs_attentuation_ust_ggplotobj)
+dev.off()
+
+boxplot_t1rvnr_predictor_cpgs_attentuation_ust_full_ggplotobj <- predictor_cpgs_limma_confounders_ust_attenuation %>%
+  dplyr::mutate(Drug = "Ustekinumab") %>%
+  ggplot(aes(x = attenuation_betadiff, y = "Attenuation of effect size")) +
+  geom_vline(xintercept = 0) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  theme_bw() +
+  labs(title = "Attenuation of effect size",
+       subtitle = "(Beta_null-Beta_adj)/Beta_null") +
+  facet_wrap(~Drug) +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 2, file = fig_boxplot_t1rvnr_predictor_cpgs_attentuation_ust_full_pdf)
+print(boxplot_t1rvnr_predictor_cpgs_attentuation_ust_full_ggplotobj)
+dev.off()
+```
+
+## Figure dumbbellplot t1rvnr confounders 
+
+```{r dumbbell t1rvnr confounders pvalue plot}
+dumbbell_t1rvnr_confounders_pvalue_vdz_ggplotobj <- predictor_cpgs_limma_confounders_vdz %>%
+  ggplot(aes(y = mlog10_pvalue, x = forcats::fct_reorder(CGID, -mlog10_pvalue), group = CGID)) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_line(alpha = 0.6) +
+  geom_point(aes(col = Model, alpha = Significance)) +
+  facet_wrap(~treatment) +
+  scale_alpha_manual(values = c("NS" = 0.25, "Significant" = 1)) +
+  labs(y = bquote(-log[10]~"(p-value)")) +
+  ylim(0,7) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())
+
+pdf(width = (14/100)*25, height = 5, file = fig_dumbbell_t1rvnr_confounders_pvalue_vdz_pdf)
+print(dumbbell_t1rvnr_confounders_pvalue_vdz_ggplotobj)
+dev.off()
+
+dumbbell_t1rvnr_confounders_pvalue_ust_ggplotobj <- predictor_cpgs_limma_confounders_ust %>%
+  ggplot(aes(y = mlog10_pvalue, x = forcats::fct_reorder(CGID, -mlog10_pvalue), group = CGID)) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_line(alpha = 0.6) +
+  geom_point(aes(col = Model, alpha = Significance)) +
+  facet_wrap(~treatment) +
+  scale_alpha_manual(values = c("NS" = 0.25, "Significant" = 1)) +
+  labs(y = bquote(-log[10]~"(p-value)")) +
+  ylim(0,7) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())
+
+pdf(width = (14/100)*68, height = 4, file = fig_dumbbell_t1rvnr_confounders_pvalue_ust_pdf)
+print(dumbbell_t1rvnr_confounders_pvalue_ust_ggplotobj)
+dev.off()
+```
+
+```{r dumbbell t1rvnr confounders betadiff plot}
+dumbbell_t1rvnr_confounders_betadiff_vdz_ggplotobj <- predictor_cpgs_limma_confounders_vdz %>%
+  ggplot(aes(y = betadiff, x = forcats::fct_reorder(CGID, -mlog10_pvalue), group = CGID)) +
+  geom_hline(yintercept = 0) +
+  geom_line(alpha = 0.6) +
+  geom_point(aes(col = Model, alpha = Significance)) +
+  facet_wrap(~treatment) +
+  scale_alpha_manual(values = c("NS" = 0.25, "Significant" = 1)) +
+  labs(y = "Difference % methylation") +
+  ylim(-20, 20) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())
+
+pdf(width = (14/100)*25, height = 5, file = fig_dumbbell_t1rvnr_confounders_betadiff_vdz_pdf)
+print(dumbbell_t1rvnr_confounders_betadiff_vdz_ggplotobj)
+dev.off()
+
+dumbbell_t1rvnr_confounders_betadiff_ust_ggplotobj <- predictor_cpgs_limma_confounders_ust %>%
+  ggplot(aes(y = betadiff, x = forcats::fct_reorder(CGID, -mlog10_pvalue), group = CGID)) +
+  geom_hline(yintercept = 0) +
+  geom_line(alpha = 0.6) +
+  geom_point(aes(col = Model, alpha = Significance)) +
+  facet_wrap(~treatment) +
+  scale_alpha_manual(values = c("NS" = 0.25, "Significant" = 1)) +
+  labs(y = "Difference % methylation") +
+  ylim(-20, 20) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())
+
+pdf(width = (14/100)*68, height = 4, file = fig_dumbbell_t1rvnr_confounders_betadiff_ust_pdf)
+print(dumbbell_t1rvnr_confounders_betadiff_ust_ggplotobj)
+dev.off()
+```
+
+```{r dumbbell t1rvnr confounders pvalue betadiff plot}
+fig_dumbbell_t1rvnr_confounders_pvalue_betadiff_vdz_ust_ggplotobj <- 
+  ggarrange(ggarrange(dumbbell_t1rvnr_confounders_pvalue_vdz_ggplotobj +
+                        theme(axis.text.x.bottom = element_blank(),
+                              axis.ticks.x.bottom = element_blank()), 
+                      dumbbell_t1rvnr_confounders_betadiff_vdz_ggplotobj,
+                      nrow = 2,
+                      align = "hv",
+                      legend = "bottom",
+                      common.legend = T),
+            ggarrange(dumbbell_t1rvnr_confounders_pvalue_ust_ggplotobj + 
+                        theme(axis.title.y = element_blank(),
+                              axis.text.x.bottom = element_blank(),
+                              axis.ticks.x.bottom = element_blank()), 
+                      dumbbell_t1rvnr_confounders_betadiff_ust_ggplotobj +
+                        theme(axis.title.y = element_blank()),
+                      nrow = 2, 
+                      align = "hv",
+                      legend = "bottom",
+                      common.legend = T),
+            common.legend = T,
+            legend = "bottom",
+            widths = c(25/100, 68/100))
+
+pdf(width = 14, height = 6, file = fig_dumbbell_t1rvnr_confounders_betadiff_pvalue_vdz_ust_pdf)
+print(fig_dumbbell_t1rvnr_confounders_pvalue_betadiff_vdz_ust_ggplotobj)
+dev.off()
+```
+
+## Figure ROC confounder predictions
+
+```{r rocplot confounder preparation}
+horaizon_predictions_vdz_confounders_cutpoint <- horaizon_predictions_vdz_confounders %>%
+  dplyr::left_join(sample_metadata, by = "SampleID") %>%
+  dplyr::select(SampleID, Predicted_response, Predicted_class, VDZ_response) %>%
+  cutpointr(., Predicted_response, VDZ_response)
+
+horaizon_predictions_ust_confounders_cutpoint <- horaizon_predictions_ust_confounders %>%
+  dplyr::left_join(sample_metadata, by = "SampleID") %>%
+  dplyr::select(SampleID, Predicted_response, Predicted_class, UST_response) %>%
+  cutpointr(., Predicted_response, UST_response)
+```
+
+```{r rocplot confounder plot}
+rocplot_confounder_vdz_ggplotobj <- horaizon_predictions_vdz_confounders %>%
+  dplyr::mutate(Cohort = "Confounder-model") %>%
+  dplyr::rows_append(horaizon_predictions_vdz_validation %>%
+                     dplyr::mutate(Cohort = "CpG-model")) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID") %>%
+  dplyr::mutate(Response_coded = ifelse(VDZ_response == "R", 1, 0),
+                label = "Vedolizumab") %>% 
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = Cohort)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(y = "TPR",
+       x = "FPR") +
+  facet_wrap(~label, ncol = 2) +
+  scale_color_manual(values = prediction_colors) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_rocplot_t1_confounders_vdz_pdf)
+print(rocplot_confounder_vdz_ggplotobj)
+dev.off()
+
+rocplot_confounder_ust_ggplotobj <- horaizon_predictions_ust_confounders %>%
+  dplyr::mutate(Cohort = "Confounder-model") %>%
+  dplyr::rows_append(horaizon_predictions_ust_validation %>%
+                     dplyr::mutate(Cohort = "CpG-model")) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID") %>%
+  dplyr::mutate(Response_coded = ifelse(UST_response == "R", 1, 0),
+                label = "Ustekinumab") %>% 
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = Cohort)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(y = "TPR",
+       x = "FPR") +
+  facet_wrap(~label, ncol = 2) +
+  scale_color_manual(values = prediction_colors) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_rocplot_t1_confounders_ust_pdf)
+print(rocplot_confounder_ust_ggplotobj)
+dev.off()
+```
+
+## sessionInfo
+
+```{r sessionInfo}
+sessionInfo()
+```

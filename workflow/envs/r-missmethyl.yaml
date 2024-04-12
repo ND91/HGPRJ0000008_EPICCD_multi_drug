@@ -1,0 +1,12 @@
+channels:
+  - bioconda      
+  - conda-forge
+  - anaconda
+  - defaults
+  - r
+dependencies:
+  - r-tidyverse
+  - bioconductor-minfi
+  - bioconductor-illuminahumanmethylationepicmanifest
+  - bioconductor-illuminahumanmethylationepicanno.ilm10b4.hg19
+  - bioconductor-missmethyl

@@ -1,31 +1,45 @@
+# RNA sequencing
+
+rnaseq_files_df = pd.read_excel(config['rnaseq_files'], header=0)
+
+rnaseq_sampleIDs = rnaseq_files_df['SampleID'].tolist()
+
+rnaseq_fastq_df = pd.concat([pd.Series(pd.concat([rnaseq_files_df['Filepath'].astype(str) + '_R1', rnaseq_files_df['Filepath'].astype(str) + '_R2']), name = 'old_path'), 
+                             pd.Series(pd.concat([rnaseq_files_df['SampleID'].astype(str) + '_R1', rnaseq_files_df['SampleID'].astype(str) + '_R2']), name = 'new_path')], 
+                            axis=1)
+
+#print(rnaseq_fastq_df)
+
+rnaseq_readfiles = rnaseq_fastq_df['new_path'].tolist()
+
 # Preparation
 
 rule rnaseq_copy_fastqs:
   input:
-    fastq=lambda w: (filedata[filedata.new_path == w.readfile].old_path + '.fastq.gz').tolist()
+    readfile=lambda w: (rnaseq_fastq_df[rnaseq_fastq_df.new_path == w.readfile].old_path + '.fastq.gz').tolist()
   output:
-    "resources/rnaseq/fastq/{readfile}.fastq.gz"
+    "resources/rnaseq/fastq/{readfile}.fastq.gz",
   conda:
-    "envs/rsync.yaml"
+    "../envs/rsync.yaml"
   message:
-    "--- Copying {input.fastq} to scratch ---"
+    "--- Copying {input.readfile} to scratch ---"
   shell:
     """
-    rsync -a {input.fastq} {output}
+    rsync -a "{input.readfile}" "{output}"
     """
 
 rule copy_star_reference:
   input:
-    config['reference_dir']
+    config['rnaseq_reference_dir'],
   output:
-    directory("resources/rnaseq/reference")
+    directory("resources/rnaseq/reference"),
   conda:
-    "envs/rsync.yaml"
+    "../envs/rsync.yaml"
   message:
     "--- Copying reference index genome to scratch ---"
   shell:
     """
-    rsync -ar {input}/ {output}
+    rsync -ar "{input}/" "{output}"
     """
 
 # QC
@@ -40,7 +54,7 @@ rule rnaseq_fastqc:
   conda:
     "../envs/fastqc.yaml"
   log:
-    "output/rnaseq/fastqc/{readfile}/{readfile}_fastqc.log",
+    "output/rnaseq/fastqc/{readfile}_fastqc.log",
   message:
     "--- FastQC {wildcards.readfile} ---"
   threads: 
@@ -49,15 +63,15 @@ rule rnaseq_fastqc:
     "output/rnaseq/fastqc/{readfile}/{readfile}.txt",
   shell:
     """
-    fastqc --outdir={output.fastqcdir} \
+    fastqc --outdir="{output.fastqcdir}" \
            --threads {threads} \
-           {input} \
-           &> {log}
+           "{input}" \
+           &> "{log}"
     """
     
 rule rnaseq_multiqc:
   input:
-    fastqc=expand("output/rnaseq/fastqc/{readfile}/{readfile}_fastqc.html", readfile=readfiles),
+    fastqc=expand("output/rnaseq/fastqc/{readfile}/{readfile}_fastqc.html", readfile=rnaseq_readfiles),
     featurecounts="output/rnaseq/counts/counts.txt",
   output:
     multiqcdir=directory('output/rnaseq/multiqc'),
@@ -76,7 +90,7 @@ rule rnaseq_multiqc:
 
 # Alignment and mapping
 
-rule star_genome_load:
+rule rnaseq_star_genome_load:
   input:
     reference="resources/rnaseq/reference"
   output:
@@ -89,11 +103,11 @@ rule star_genome_load:
     8
   shell:
     """
-    STAR --genomeDir {input.reference} \
+    STAR --genomeDir "{input.reference}" \
          --genomeLoad LoadAndExit
     """
 
-rule star_pe:
+rule rnaseq_star_pe:
   input:
     reference="resources/rnaseq/reference",
     fastq_r1="resources/rnaseq/fastq/{sampleID}_R1.fastq.gz",
@@ -128,10 +142,10 @@ rule star_pe:
          |& tee -a {log}
     """
 
-rule star_genome_unload:
+rule rnaseq_star_genome_unload:
   input:
     reference="resources/rnaseq/reference",
-    bam=expand("output/rnaseq/bam/{sampleID}/{sampleID}_pe_Aligned.sortedByCoord.out.bam", sampleID=sampleIDs),
+    bam=expand("output/rnaseq/bam/{sampleID}/{sampleID}_pe_Aligned.sortedByCoord.out.bam", sampleID=rnaseq_sampleIDs),
     idx="output/rnaseq/genome_loaded.done",
   output:
     "output/rnaseq/bam/STAR_genome_unload_Log.out"
@@ -152,7 +166,7 @@ rule star_genome_unload:
     rm {input.idx}
     """
 
-rule samtools_filter:
+rule rnaseq_samtools_filter:
   input:
     bam="output/rnaseq/bam/{sampleID}/{sampleID}_pe_Aligned.sortedByCoord.out.bam",
   output:
@@ -177,7 +191,7 @@ rule samtools_filter:
     samtools view -@ {threads} -S -h -F 260 -q 10 {input.bam} | awk '($1 ~ /^@/) || ($3 != "MT") {{ print $0 }}' | samtools view -@ {threads} -b -o {output.bam_filtered} - |& tee -a {log}
     """
 
-rule samtools_index:
+rule rnaseq_samtools_index:
   input:
     bam="output/rnaseq/bam/{sampleID}/{sampleID}_filtered.bam",
   output:
@@ -197,9 +211,9 @@ rule samtools_index:
     samtools index -b -@ {threads} {input.bam} |& tee -a {log}
     """
     
-rule featurecounts:
+rule rnaseq_featurecounts:
   input:
-    bams=expand("output/rnaseq/bam/{sampleID}/{sampleID}_filtered.bam", sampleID=sampleIDs),
+    bams=expand("output/rnaseq/bam/{sampleID}/{sampleID}_filtered.bam", sampleID=rnaseq_sampleIDs),
     annotationfile=config['rnaseq_gtf_file'],
   output:
     "output/rnaseq/counts/counts.txt"
@@ -214,50 +228,124 @@ rule featurecounts:
   shell:
     """    
     featureCounts -T {threads} \
-                  -a {input.annotationfile} \
+                  -a "{input.annotationfile}" \
                   -t exon \
                   -g gene_id \
                   -p \
-                  -o {output} \
+                  -o "{output}" \
                   {input.bams}
     """
 
-# DESeq2 analyses
+# DE analyses
 
-rule deseq2_import:
+rule rnaseq_r_deseq2_import:
   input:
+    sample_metadata_xlsx=config['sample_metadata'],
+    rnaseq_files_xlsx=config['rnaseq_files'],
     counts_txt="output/rnaseq/counts/counts.txt",
   output:
-    dds_rds="output/rnaseq/r/dds.Rds",
-	rlog_rds="output/rnaseq/r/rlog.Rds",
+    dds_rds="{basedir}/output/rnaseq/r/dds.Rds",
+	  rld_rds="{basedir}/output/rnaseq/r/rld.Rds",
   conda:
-    "../envs/r.yaml"
+    "../envs/r-deseq2.yaml"
   log:
-    "output/rnaseq/counts/deseq2_import.log"
+    "{basedir}/output/rnaseq/deseq2_import.log"
   message:
-    "--- Import reads into R DESeq2 ---"
+    "--- Import reads into R and store it as a DESeq2 object ---"
   threads: 
     1
   shell:
     """    
-    Rscript --vanilla workflow/scripts/rnaseq_preparation/deseq2_import.R {input.counts_txt} {output.dds_rds} {output.rlog_rds} &> {log}
+    Rscript --vanilla workflow/scripts/rnaseq/deseq2_import.R "{input.sample_metadata_xlsx}" "{input.rnaseq_files_xlsx}" "{input.counts_txt}" "{output.dds_rds}" "{output.rld_rds}" &> "{log}"
     """
 
-rule deseq2_eda:
+rule rnaseq_r_subsetting:
   input:
-    dds_rds="output/rnaseq/r/dds.Rds",
-	rlog_rds="output/rnaseq/r/rlog.Rds",
+    dds_rds="{basedir}/output/rnaseq/r/dds.Rds",
   output:
-   
+    dds_subset_rds="{basedir}/output/rnaseq/r/dds_{treatment}.Rds",
+    rld_subset_rds="{basedir}/output/rnaseq/r/rld_{treatment}.Rds",
   conda:
-    "../envs/r.yaml"
+    "../envs/r-deseq2.yaml"
   log:
-    "output/rnaseq/counts/deseq2_import.log"
+    "{basedir}/output/rnaseq/subsetting_{treatment}.log",
+  benchmark:
+    "{basedir}/output/rnaseq/subsetting_{treatment}_benchmark.txt",
   message:
-    "--- Import reads into R DESeq2 and perform QC ---"
-  threads: 
+    "--- Subsetting RNAseq data ---",
+  params:
+    treatment="{treatment}",
+  threads:
+    1
+  resources:
+    mem_mb=189000,
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/rnaseq/subsetting.R "{input.dds_rds}" "{params.treatment}" "{output.dds_subset_rds}" "{output.rld_subset_rds}"  &> "{log}"
+    """
+
+# rule rnaseq_r_eda:
+#   input:
+# 	  rlog_rds="output/rnaseq/r/rlog.Rds",
+#   output:
+#     heatmap_pairwise_correlation_pdf,
+#     scatterplot_pc1_pc2_pdf,
+#   conda:
+#     "../envs/r-deseq2.yaml"
+#   log:
+#     "output/rnaseq/deseq2_eda.log"
+#   message:
+#     "--- Import reads into R DESeq2 and perform QC ---",
+#   params:
+#     treatment="{treatment}",
+#   threads: 
+#     1
+#   shell:
+#     """    
+#     Rscript --vanilla workflow/scripts/rnaseq/eda.R "{input.counts_txt}" "{output.dds_rds}" "{output.rlog_rds}" &> "{log}"
+#     """
+ 
+rule rnaseq_r_de:
+  input:
+	  dds_subset_rds="{basedir}/output/rnaseq/r/dds_{treatment}.Rds",
+  output:
+    degs_csv="{basedir}/output/rnaseq/degs/degs_{treatment}.csv",
+  conda:
+    "../envs/r-deseq2.yaml"
+  log:
+    "{basedir}/output/rnaseq/de_{treatment}.log",
+  benchmark:
+    "{basedir}/output/rnaseq/de_{treatment}_benchmark.txt",
+  message:
+    "--- Performing DE analyses ---",
+  params:
+    treatment="{treatment}",
+  threads:
     1
   shell:
-    """    
-    Rscript --vanilla workflow/scripts/rnaseq_preparation/deseq2_import.R {input.counts_txt} {output.dds_rds} {output.rlog_rds} &> {log}
+    """
+    Rscript --vanilla workflow/scripts/rnaseq/de_analyses.R "{input.dds_subset_rds}" "{params.treatment}" "{output.degs_csv}" &> "{log}"
+    """
+
+rule rnaseq_r_fgsea:
+  input:
+    degs_csv="{basedir}/output/rnaseq/degs/degs_{treatment}.csv",
+  output:
+    fgsea_go_list_rds="{basedir}/output/rnaseq/fgsea/fgsea_go_{treatment}_fgseaobj_list.Rds",
+    fgsea_go_csv="{basedir}/output/rnaseq/fgsea/fgsea_go_{treatment}.csv",
+    fgsea_kegg_list_rds="{basedir}/output/rnaseq/fgsea/fgsea_kegg_{treatment}_fgseaobj_list.Rds",
+    fgsea_kegg_csv="{basedir}/output/rnaseq/fgsea/fgsea_kegg_{treatment}.csv",
+  conda:
+    "../envs/r-fgsea.yaml"
+  log:
+    "{basedir}/output/rnaseq/fgsea_{treatment}.log",
+  benchmark:
+    "{basedir}/output/rnaseq/fgsea_{treatment}_benchmark.txt",
+  message:
+    "--- Performing DE FGSEA analyses ---",
+  threads:
+    1
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/rnaseq/fgsea_analyses.R "{input.degs_csv}" "{output.fgsea_go_list_rds}" "{output.fgsea_go_csv}" "{output.fgsea_kegg_list_rds}" "{output.fgsea_kegg_csv}" &> "{log}"
     """

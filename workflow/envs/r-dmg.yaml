@@ -1,0 +1,12 @@
+channels:
+  - bioconda      
+  - conda-forge
+  - anaconda
+  - defaults
+  - r
+dependencies:
+  - r-tidyverse
+  - r-statmod
+  - bioconductor-minfi
+  - bioconductor-limma
+  - bioconductor-empiricalbrownsmethod

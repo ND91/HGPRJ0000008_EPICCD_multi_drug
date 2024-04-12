@@ -1,0 +1,864 @@
+---
+title: "Figure Rebuttal Reviewer 3 Point 6"
+author: "Andrew Y.F. Li Yim"
+date: '2024-02-20'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Reviewer 3 noted in point 6 that prior exposure to anti-TNF was significantly associated with response to VDZ and UST. The question is whether a model built solely on prior exposure to anti-TNF would suffice as a model. The first point to note, it is evident that there is a significant association, suggesting that there will likely be some predictive performance. A second point to note is that we need not implement any "fancy" machine learning technologies here as the feature of interest has already been selected. Accordingly, we will implement a simple logistic regression approach. All the analyses have been conducted already, here we will only visualize the results.
+
+```{r libraries}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(plotROC)
+library(ggpubr)
+library(ggrastr)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+sample_metadata_xlsx <- file.path(basepath, "config/samples/sample_metadata.xlsx")
+
+predictor_cpgs_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+glmmodel_predictions_vdz_csv <- file.path(basepath, "output/epic/metadata/priorantitnf_summary_glmmodel_Vedolizumab_predictions_validation.csv")
+glmmodel_predictions_ust_csv <- file.path(basepath, "output/epic/metadata/priorantitnf_summary_glmmodel_Ustekinumab_predictions_validation.csv")
+
+horaizon_predictions_vdz_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_validation.xlsx")
+horaizon_predictions_ust_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_validation.xlsx")
+
+horaizon_predictions_vdz_ancillary_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_ancillary_validation.xlsx")
+horaizon_predictions_ust_ancillary_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_ancillary_validation.xlsx")
+
+horaizon_predictions_vdz_ust_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_discoveryvalidation_Vedolizumabmodel.xlsx")
+horaizon_predictions_ust_vdz_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_discoveryvalidation_Ustekinumabmodel.xlsx")
+
+horaizon_predictions_vdz_confounders_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_confounders.xlsx")
+horaizon_predictions_ust_confounders_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_confounders.xlsx")
+
+horaizon_predictions_vdz_confounders_regressed_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_confounders_regressed.xlsx")
+horaizon_predictions_ust_confounders_regressed_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_confounders_regressed.xlsx")
+
+horaizon_predictions_vdz_randomforests_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_randomforests.xlsx")
+horaizon_predictions_ust_randomforests_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_randomforests.xlsx")
+
+horaizon_predictions_vdz_elasticnet_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_elasticnet.xlsx")
+horaizon_predictions_ust_elasticnet_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_elasticnet.xlsx")
+
+gmset_vdz_rds <- file.path(basepath, "output/epic/subset/gmset_Vedolizumab.Rds")
+gmset_ust_rds <- file.path(basepath, "output/epic/subset/gmset_Ustekinumab.Rds")
+
+dmps_categorical_vdz_csv <- file.path(basepath, "output/epic/dmp/dmp_Vedolizumab.csv")
+dmps_categorical_ust_csv <- file.path(basepath, "output/epic/dmp/dmp_Ustekinumab.csv")
+
+dmps_continuous_vdz_csv <- file.path(basepath, "output/epic/dmp/dmp_continuous_Vedolizumab.csv")
+dmps_continuous_ust_csv <- file.path(basepath, "output/epic/dmp/dmp_continuous_Ustekinumab.csv")
+```
+
+```{r outpaths}
+figpath <- file.path(basepath, "output/figures/fig_rebuttal")
+dir.create(figpath)
+
+fig1_pdf <- file.path(figpath, "fig1.pdf")
+fig2_pdf <- file.path(figpath, "fig2.pdf")
+fig3_pdf <- file.path(figpath, "fig3.pdf")
+fig4_pdf <- file.path(figpath, "fig4.pdf")
+fig5_pdf <- file.path(figpath, "fig5.pdf")
+fig6_pdf <- file.path(figpath, "fig6.pdf")
+```
+
+```{r import}
+glmmodel_predictions_vdz <- read.csv(glmmodel_predictions_vdz_csv)
+glmmodel_predictions_ust <- read.csv(glmmodel_predictions_ust_csv)
+
+sample_metadata <- readxl::read_excel(sample_metadata_xlsx)
+
+predictor_cpgs_vdz <- readxl::read_excel(predictor_cpgs_xlsx) %>%
+  dplyr::filter(Treatment == "Vedolizumab")
+predictor_cpgs_ust <- readxl::read_excel(predictor_cpgs_xlsx) %>%
+  dplyr::filter(Treatment == "Ustekinumab")
+
+horaizon_predictions_vdz_validation <- readxl::read_excel(horaizon_predictions_vdz_validation_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+horaizon_predictions_ust_validation <- readxl::read_excel(horaizon_predictions_ust_validation_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+
+horaizon_predictions_vdz_ancillary_validation <- readxl::read_excel(horaizon_predictions_vdz_ancillary_validation_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+horaizon_predictions_ust_ancillary_validation <- readxl::read_excel(horaizon_predictions_ust_ancillary_validation_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+
+horaizon_predictions_vdz_ust_validation <- readxl::read_excel(horaizon_predictions_vdz_ust_validation_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+horaizon_predictions_ust_vdz_validation <- readxl::read_excel(horaizon_predictions_ust_vdz_validation_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+
+horaizon_predictions_vdz_confounders <- readxl::read_excel(horaizon_predictions_vdz_confounders_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+horaizon_predictions_ust_confounders <- readxl::read_excel(horaizon_predictions_ust_confounders_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+
+horaizon_predictions_vdz_confounders_regressed <- readxl::read_excel(horaizon_predictions_vdz_confounders_regressed_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+horaizon_predictions_ust_confounders_regressed <- readxl::read_excel(horaizon_predictions_ust_confounders_regressed_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+
+horaizon_predictions_vdz_randomforests <- readxl::read_excel(horaizon_predictions_vdz_randomforests_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+horaizon_predictions_ust_randomforests <- readxl::read_excel(horaizon_predictions_ust_randomforests_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+
+horaizon_predictions_vdz_elasticnet <- readxl::read_excel(horaizon_predictions_vdz_elasticnet_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+horaizon_predictions_ust_elasticnet <- readxl::read_excel(horaizon_predictions_ust_elasticnet_xlsx, skip = 1) %>%
+  dplyr::left_join(sample_metadata, by = "SampleID")
+
+gmset_vdz <- readRDS(gmset_vdz_rds)
+gmset_ust <- readRDS(gmset_ust_rds)
+
+dmps_categorical_vdz <- read.csv(dmps_categorical_vdz_csv)
+dmps_categorical_ust <- read.csv(dmps_categorical_ust_csv)
+
+dmps_continuous_vdz <- read.csv(dmps_continuous_vdz_csv)
+dmps_continuous_ust <- read.csv(dmps_continuous_ust_csv)
+```
+
+```{r colors}
+response_cols <- c("R" = "#61ff69",
+                   "NR" = "#ff6961")
+cohort_colors <- c("Discovery" = "#D55E00",
+                   "Validation" = "#0072B2")
+criteria_colors <- c("Partial" = "#CC79A7",
+                     "Full" = "#56B4E9")
+atnf_colors <- c("Exposed" = "#999999",
+                 "Non-exposed" = "#F0E442")
+```
+
+## Preparation
+
+```{r horaizon validation prediction statistics}
+horaizon_predictions_vdz_validation_stats <- horaizon_predictions_vdz_validation  %>%
+  dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_ust_validation_stats <- horaizon_predictions_ust_validation  %>%
+  dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+```
+
+## Figure 1: Ancillary validation 
+
+```{r horaizon ancillary validation prediction statistics}
+horaizon_predictions_ancillary_vdz_validation_stats <- horaizon_predictions_vdz_ancillary_validation %>%
+  dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_ancillary_ust_validation_stats <- horaizon_predictions_ust_ancillary_validation %>%
+  dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+```
+
+```{r rocplot horaizon ancillary validation}
+rocplot_ancillary_vdz <- horaizon_predictions_vdz_ancillary_validation %>%
+  dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_recoded, m = Predicted_response)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Vedolizumab",
+       subtitle = paste0("AUC = ", round(horaizon_predictions_ancillary_vdz_validation_stats$auroc, 2)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_ancillary_ust <- horaizon_predictions_ust_ancillary_validation %>%
+  dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_recoded, m = Predicted_response)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Ustekinumab",
+       subtitle = paste0("AUC = ", round(horaizon_predictions_ancillary_ust_validation_stats$auroc, 2)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_ancillary_ggplotobj <- ggarrange(rocplot_ancillary_vdz, rocplot_ancillary_ust, labels = c("A)", "B)"), align = "hv")
+
+pdf(fig1_pdf, width = 10, height = 5)
+print(rocplot_ancillary_ggplotobj)
+dev.off()
+```
+
+## Figure 2: Prior anti-TNF exposure validation
+
+```{r priorantitnf prediction statistics}
+glmmodel_predictions_vdz_stats <- glmmodel_predictions_vdz %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predictions),
+                   recall = Metrics::recall(Response_recoded, Predictions),
+                   tpr = Metrics::precision(Response_recoded, Predictions),
+                   f1 = Metrics::f1(Response_recoded, Predictions))
+
+glmmodel_predictions_ust_stats <- glmmodel_predictions_ust %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predictions),
+                   recall = Metrics::recall(Response_recoded, Predictions),
+                   tpr = Metrics::precision(Response_recoded, Predictions),
+                   f1 = Metrics::f1(Response_recoded, Predictions))
+```
+
+```{r rocplot priorantitnf}
+rocplot_priorantitnf_vdz <- glmmodel_predictions_vdz %>%
+  ggplot(aes(d = Response_recoded, m = Predictions)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Vedolizumab",
+       subtitle = paste0("AUC = ", round(glmmodel_predictions_vdz_stats$auroc, 3)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_priorantitnf_ust <- glmmodel_predictions_ust %>%
+  ggplot(aes(d = Response_recoded, m = Predictions)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Ustekinumab",
+       subtitle = paste0("AUC = ", round(glmmodel_predictions_ust_stats$auroc, 3)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_antitnf_ggplotobj <- ggarrange(rocplot_priorantitnf_vdz, rocplot_priorantitnf_ust, labels = c("A)", "B)"), align = "hv")
+
+pdf(fig2_pdf, width = 10, height = 5)
+print(rocplot_antitnf_ggplotobj)
+dev.off()
+```
+
+## Figure 3: Cross drug analyses
+
+```{r crossdrug prediction statistics}
+horaizon_predictions_ust_vdz_validation_stats <- horaizon_predictions_ust_vdz_validation %>%
+  dplyr::mutate(Response_recoded = ifelse(Actual_class  == "R", 1, 0)) %>%
+  # dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_vdz_ust_validation_stats <- horaizon_predictions_vdz_ust_validation %>%
+  dplyr::mutate(Response_recoded = ifelse(Actual_class  == "R", 1, 0)) %>%
+  # dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_ust_vdz_validation_stratatnf_stats <- horaizon_predictions_ust_vdz_validation %>%
+  dplyr::filter(!is.na(Prior_aTNF_exposure)) %>%
+  dplyr::mutate(Response_recoded = ifelse(Actual_class  == "R", 1, 0)) %>%
+  # dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  dplyr::group_by(Prior_aTNF_exposure) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_vdz_ust_validation_stratatnf_stats <- horaizon_predictions_vdz_ust_validation %>%
+  dplyr::filter(!is.na(Prior_aTNF_exposure)) %>%
+  dplyr::mutate(Response_recoded = ifelse(Actual_class  == "R", 1, 0)) %>%
+  # dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  dplyr::group_by(Prior_aTNF_exposure) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+```
+
+```{r rocplot crossdrug}
+rocplot_crossdrug_vdz_ustcohort_ggplotobj <- horaizon_predictions_ust_vdz_validation %>%
+  dplyr::mutate(Response_recoded = ifelse(Actual_class  == "R", 1, 0)) %>%
+  # dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_recoded, m = Predicted_response)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Vedolizumab model predicting ustekinumab response",
+       subtitle = paste0("AUC = ", round(horaizon_predictions_ust_vdz_validation_stats$auroc, 3)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_crossdrug_ust_vdzcohort_ggplotobj <- horaizon_predictions_vdz_ust_validation %>%
+  dplyr::mutate(Response_recoded = ifelse(Actual_class  == "R", 1, 0)) %>%
+  # dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_recoded, m = Predicted_response)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Ustekinumab model predicting vedolizumab response",
+       subtitle = paste0("AUC = ", round(horaizon_predictions_vdz_ust_validation_stats$auroc, 3)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_crossdrug_vdz_ustcohort_stratatnf_ggplotobj <- horaizon_predictions_ust_vdz_validation %>%
+  dplyr::filter(!is.na(Prior_aTNF_exposure)) %>%
+  dplyr::mutate(Response_recoded = ifelse(Actual_class  == "R", 1, 0)) %>%
+  # dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_recoded, m = Predicted_response, col = Prior_aTNF_exposure)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Vedolizumab model predicting ustekinumab response",
+       subtitle = paste0("AUC (Exposed) = ", round(horaizon_predictions_ust_vdz_validation_stratatnf_stats$auroc[1], 3), "\nAUC (Non-exposed) = ", round(horaizon_predictions_ust_vdz_validation_stratatnf_stats$auroc[2], 3)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_crossdrug_ust_vdzcohort_stratatnf_ggplotobj <- horaizon_predictions_vdz_ust_validation %>%
+  dplyr::filter(!is.na(Prior_aTNF_exposure)) %>%
+  dplyr::mutate(Response_recoded = ifelse(Actual_class  == "R", 1, 0)) %>%
+  # dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_recoded, m = Predicted_response, col = Prior_aTNF_exposure)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Ustekinumab model predicting vedolizumab response",
+       subtitle = paste0("AUC (Exposed) = ", round(horaizon_predictions_vdz_ust_validation_stratatnf_stats$auroc[1], 3), "\nAUC (Non-exposed) = ", round(horaizon_predictions_vdz_ust_validation_stratatnf_stats$auroc[2], 3)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_crossdrug_ggplotobj <- ggarrange(rocplot_crossdrug_vdz_ustcohort_ggplotobj, rocplot_crossdrug_ust_vdzcohort_ggplotobj,
+                                         rocplot_crossdrug_vdz_ustcohort_stratatnf_ggplotobj, rocplot_crossdrug_ust_vdzcohort_stratatnf_ggplotobj, 
+                                         labels = c("A)", "B)", "C)", "D)"), 
+                                         nrow = 2,
+                                         ncol = 2,
+                                         align = "hv")
+
+pdf(fig3_pdf, width = 12.5, height = 12.5)
+print(rocplot_crossdrug_ggplotobj)
+dev.off()
+```
+
+## Figure 4: Confounder analyses
+
+```{r confounder prediction statistics}
+horaizon_predictions_vdz_confounders_stats <- horaizon_predictions_vdz_confounders %>%
+  dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_ust_confounders_stats <- horaizon_predictions_ust_confounders %>%
+  dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+```
+
+```{r confounder regressed prediction statistics}
+horaizon_predictions_vdz_confounders_regressed_stats <- horaizon_predictions_vdz_confounders_regressed %>%
+  dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_ust_confounders_regressed_stats <- horaizon_predictions_ust_confounders_regressed %>%
+  dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+```
+
+```{r rocplot confounder}
+rocplot_confounder_vdz_ggplotobj <- horaizon_predictions_vdz_confounders %>%
+  dplyr::mutate(Cohort = "Confounder-model") %>%
+  dplyr::rows_append(horaizon_predictions_vdz_validation %>%
+                       dplyr::mutate(Cohort = "CpG-model")) %>%
+  dplyr::rows_append(horaizon_predictions_vdz_confounders_regressed %>%
+                       dplyr::mutate(Cohort = "Confounder regressed-model")) %>%
+  # dplyr::left_join(sample_metadata, by = "SampleID") %>%
+  dplyr::mutate(Response_coded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = Cohort)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Vedolizumab",
+       subtitle = paste0("AUC (CpG-model) = ", round(horaizon_predictions_vdz_validation_stats$auroc, 2),"\nAUC (Confounder-model) = ", round(horaizon_predictions_vdz_confounders_stats$auroc, 2),"\nAUC (Confounder regressed-model) = ", round(horaizon_predictions_vdz_confounders_regressed_stats$auroc, 2)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_confounder_ust_ggplotobj <- horaizon_predictions_ust_confounders %>%
+  dplyr::mutate(Cohort = "Confounder-model") %>%
+  dplyr::rows_append(horaizon_predictions_ust_validation %>%
+                       dplyr::mutate(Cohort = "CpG-model")) %>%
+  dplyr::rows_append(horaizon_predictions_ust_confounders_regressed %>%
+                       dplyr::mutate(Cohort = "Confounder regressed-model")) %>%
+  # dplyr::left_join(sample_metadata, by = "SampleID") %>%
+  dplyr::mutate(Response_coded = ifelse(UST_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = Cohort)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Ustekinumab",
+       subtitle = paste0("AUC (CpG-model) = ", round(horaizon_predictions_ust_validation_stats$auroc, 2),"\nAUC (Confounder-model) = ", round(horaizon_predictions_ust_confounders_stats$auroc, 2),"\nAUC (Confounder regressed-model) = ", round(horaizon_predictions_ust_confounders_regressed_stats$auroc, 2)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_confounder_ggplotobj <- ggarrange(rocplot_confounder_vdz_ggplotobj, rocplot_confounder_ust_ggplotobj, labels = c("A)", "B)"), align = "hv", common.legend = T, legend = "bottom")
+
+pdf(fig4_pdf, width = 10, height = 5)
+print(rocplot_confounder_ggplotobj)
+dev.off()
+```
+
+## Figure 5: Alternative classification analyses
+
+```{r alternative classification statistics}
+horaizon_predictions_vdz_randomforests_stats <- horaizon_predictions_vdz_randomforests %>%
+  dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_ust_randomforests_stats <- horaizon_predictions_ust_randomforests %>%
+  dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_vdz_elasticnet_stats <- horaizon_predictions_vdz_elasticnet %>%
+  dplyr::mutate(Response_recoded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+
+horaizon_predictions_ust_elasticnet_stats <- horaizon_predictions_ust_elasticnet %>%
+  dplyr::mutate(Response_recoded = ifelse(UST_response == "R", 1, 0)) %>%
+  dplyr::summarize(auroc = Metrics::auc(Response_recoded, Predicted_response),
+                   recall = Metrics::recall(Response_recoded, Predicted_response),
+                   tpr = Metrics::precision(Response_recoded, Predicted_response),
+                   f1 = Metrics::f1(Response_recoded, Predicted_response))
+```
+
+```{r rocplot alternative classification}
+rocplot_alternativeclassification_vdz_ggplotobj <- horaizon_predictions_vdz_validation %>%
+  dplyr::mutate(Method = "Stability selected gradient boosting") %>%
+  dplyr::rows_append(horaizon_predictions_vdz_randomforests %>%
+                       dplyr::mutate(Method = "Random forests")) %>%
+  dplyr::rows_append(horaizon_predictions_vdz_elasticnet %>%
+                       dplyr::mutate(Method = "Elastic net")) %>%
+  dplyr::mutate(Response_coded = ifelse(VDZ_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = Method)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Vedolizumab",
+       subtitle = paste0("AUC (Stability selected gradient boosting) = ", round(horaizon_predictions_vdz_validation_stats$auroc, 2),"\nAUC (Random forests) = ", round(horaizon_predictions_vdz_randomforests_stats$auroc, 2),"\nAUC (Elastic net) = ", round(horaizon_predictions_vdz_elasticnet_stats$auroc, 2)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_alternativeclassification_ust_ggplotobj <- horaizon_predictions_ust_validation %>%
+  dplyr::mutate(Method = "Stability selected gradient boosting") %>%
+  dplyr::rows_append(horaizon_predictions_ust_randomforests %>%
+                       dplyr::mutate(Method = "Random forests")) %>%
+  dplyr::rows_append(horaizon_predictions_ust_elasticnet %>%
+                       dplyr::mutate(Method = "Elastic net")) %>%
+  # dplyr::left_join(sample_metadata, by = "SampleID") %>%
+  dplyr::mutate(Response_coded = ifelse(UST_response == "R", 1, 0)) %>%
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = Method)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(title = "Ustekinumab",
+       subtitle = paste0("AUC (Stability selected gradient boosting) = ", round(horaizon_predictions_ust_validation_stats$auroc, 2),"\nAUC (Random forests) = ", round(horaizon_predictions_ust_randomforests_stats$auroc, 2),"\nAUC (Elastic net) = ", round(horaizon_predictions_ust_elasticnet_stats$auroc, 2)),
+       y = "TPR",
+       x = "FPR") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+rocplot_alternativeclassification_ggplotobj <- ggarrange(rocplot_alternativeclassification_vdz_ggplotobj, rocplot_alternativeclassification_ust_ggplotobj, labels = c("A)", "B)"), align = "hv", common.legend = T, legend = "bottom")
+
+pdf(fig5_pdf, width = 10, height = 5)
+print(rocplot_alternativeclassification_ggplotobj)
+dev.off()
+```
+
+## Figure 6: Continuous variable analysis
+
+```{r volcanoplot SES-CD}
+volcanoplot_ses_vdz_ggplotobj <- dmps_continuous_vdz %>%
+  dplyr::select(CGID, P.Value_dSES, adj.P.Val_dSES, Betadiff_dSES) %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% predictor_cpgs_vdz$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_dSES*100, y = -log10(P.Value_dSES), col = Predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(Predictor == "Predictor"),
+                  col = "#000000") +
+  labs(title = "Delta SES-CD",
+       subtitle = "Vedolizumab",
+       x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  #ylim(0, 6.5) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+volcanoplot_ses_ust_ggplotobj <- dmps_continuous_ust %>%
+  dplyr::select(CGID, P.Value_dSES, adj.P.Val_dSES, Betadiff_dSES) %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% predictor_cpgs_ust$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_dSES*100, y = -log10(P.Value_dSES), col = Predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(Predictor == "Predictor"),
+                  col = "#000000") +
+  labs(subtitle = "Ustekinumab",
+       x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  #ylim(0, 6.5) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r volcanoplot HBI}
+volcanoplot_hbi_vdz_ggplotobj <- dmps_continuous_vdz %>%
+  dplyr::select(CGID, P.Value_dHBI, adj.P.Val_dHBI, Betadiff_dHBI) %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% predictor_cpgs_vdz$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_dHBI*100, y = -log10(P.Value_dHBI), col = Predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(Predictor == "Predictor"),
+                  col = "#000000") +
+  labs(title = "Delta HBI",
+       subtitle = "Vedolizumab",
+       x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  #ylim(0, 6.5) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+volcanoplot_hbi_ust_ggplotobj <- dmps_continuous_ust %>%
+  dplyr::select(CGID, P.Value_dHBI, adj.P.Val_dHBI, Betadiff_dHBI) %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% predictor_cpgs_ust$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_dHBI*100, y = -log10(P.Value_dHBI), col = Predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(Predictor == "Predictor"),
+                  col = "#000000") +
+  labs(subtitle = "Ustekinumab",
+       x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  #ylim(0, 6.5) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r volcanoplot logCRP}
+volcanoplot_logcrp_vdz_ggplotobj <- dmps_continuous_vdz %>%
+  dplyr::select(CGID, P.Value_dlogCRP, adj.P.Val_dlogCRP, Betadiff_dlogCRP) %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% predictor_cpgs_vdz$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_dlogCRP*100, y = -log10(P.Value_dlogCRP), col = Predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(Predictor == "Predictor"),
+                  col = "#000000") +
+  labs(title = "Delta logCRP",
+       subtitle = "Vedolizumab",
+       x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  #ylim(0, 6.5) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+volcanoplot_logcrp_ust_ggplotobj <- dmps_continuous_ust %>%
+  dplyr::select(CGID, P.Value_dlogCRP, adj.P.Val_dlogCRP, Betadiff_dlogCRP) %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% predictor_cpgs_ust$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_dlogCRP*100, y = -log10(P.Value_dlogCRP), col = Predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(Predictor == "Predictor"),
+                  col = "#000000") +
+  labs(subtitle = "Ustekinumab",
+       x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  #ylim(0, 6.5) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r volcanoplot Calprotectin}
+volcanoplot_calprotectin_vdz_ggplotobj <- dmps_continuous_vdz %>%
+  dplyr::select(CGID, P.Value_dCalprotectin, adj.P.Val_dCalprotectin, Betadiff_dCalprotectin) %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% predictor_cpgs_vdz$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_dCalprotectin*100, y = -log10(P.Value_dCalprotectin), col = Predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(Predictor == "Predictor"),
+                  col = "#000000") +
+  labs(title = "Delta fecal calprotectin",
+       subtitle = "Vedolizumab",
+       x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  #ylim(0, 6.5) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+volcanoplot_calprotectin_ust_ggplotobj <- dmps_continuous_ust %>%
+  dplyr::select(CGID, P.Value_dCalprotectin, adj.P.Val_dCalprotectin, Betadiff_dCalprotectin) %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% predictor_cpgs_ust$CpG, "Predictor", "Non-predictor")) %>%
+  ggplot(aes(x = Betadiff_dCalprotectin*100, y = -log10(P.Value_dCalprotectin), col = Predictor)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>% 
+                    dplyr::filter(Predictor == "Predictor"),
+                  col = "#000000") +
+  labs(subtitle = "Ustekinumab",
+       x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  #ylim(0, 6.5) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r boxplot pvalues continuous response}
+dmps_aggregated_vdz <- dmps_categorical_vdz %>%
+  dplyr::filter(CGID %in% predictor_cpgs_vdz$CpG) %>%
+  dplyr::select(CGID, t_T1RvNR, P.Value_T1RvNR, adj.P.Val_T1RvNR, Betadiff_T1RvNR) %>%
+  dplyr::rename(t = 2,
+                P.Value = 3,
+                adj.P.Val = 4,
+                Betadiff = 5) %>%
+  dplyr::mutate(Comparison = "RvNR") %>%
+  dplyr::rows_append(dmps_continuous_vdz %>%
+                       dplyr::filter(CGID %in% predictor_cpgs_vdz$CpG) %>%
+                       dplyr::select(CGID, t_dSES, P.Value_dSES, adj.P.Val_dSES, Betadiff_dSES) %>%
+                       dplyr::rename(t = 2,
+                                     P.Value = 3,
+                                     adj.P.Val = 4,
+                                     Betadiff = 5) %>%
+                       dplyr::mutate(Comparison = "Delta SES")) %>%
+  dplyr::rows_append(dmps_continuous_vdz %>%
+                       dplyr::filter(CGID %in% predictor_cpgs_vdz$CpG) %>%
+                       dplyr::select(CGID, t_dHBI, P.Value_dHBI, adj.P.Val_dHBI, Betadiff_dHBI) %>%
+                       dplyr::rename(t = 2,
+                                     P.Value = 3,
+                                     adj.P.Val = 4,
+                                     Betadiff = 5) %>%
+                       dplyr::mutate(Comparison = "Delta HBI")) %>%
+  dplyr::rows_append(dmps_continuous_vdz %>%
+                       dplyr::filter(CGID %in% predictor_cpgs_vdz$CpG) %>%
+                       dplyr::select(CGID, t_dlogCRP, P.Value_dlogCRP, adj.P.Val_dlogCRP, Betadiff_dlogCRP) %>%
+                       dplyr::rename(t = 2,
+                                     P.Value = 3,
+                                     adj.P.Val = 4,
+                                     Betadiff = 5) %>%
+                       dplyr::mutate(Comparison = "Delta CRP")) 
+  # dplyr::rows_append(dmps_continuous_vdz %>%
+  #                      dplyr::filter(CGID %in% predictor_cpgs_vdz$CpG) %>%
+  #                      dplyr::select(CGID, t_dCalprotectin, P.Value_dCalprotectin, adj.P.Val_dCalprotectin, Betadiff_dCalprotectin) %>%
+  #                      dplyr::rename(t = 2,
+  #                                    P.Value = 3,
+  #                                    adj.P.Val = 4,
+  #                                    Betadiff = 5) %>%
+  #                      dplyr::mutate(Comparison = "Delta fecal calprotectin"))
+
+boxplot_continuous_pval_vdz_ggplotobj <- dmps_aggregated_vdz %>%
+  ggplot(aes(x = Comparison, y = -log10(P.Value)),) +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_point(col = "#808080") +
+  geom_line(col = "#808080", aes(group = CGID)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  labs(title = "Vedolizumab") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())
+
+dmps_aggregated_ust <- dmps_categorical_ust %>%
+  dplyr::filter(CGID %in% predictor_cpgs_ust$CpG) %>%
+  dplyr::select(CGID, t_T1RvNR, P.Value_T1RvNR, adj.P.Val_T1RvNR, Betadiff_T1RvNR) %>%
+  dplyr::rename(t = 2,
+                P.Value = 3,
+                adj.P.Val = 4,
+                Betadiff = 5) %>%
+  dplyr::mutate(Comparison = "RvNR") %>%
+  dplyr::rows_append(dmps_continuous_ust %>%
+                       dplyr::filter(CGID %in% predictor_cpgs_ust$CpG) %>%
+                       dplyr::select(CGID, t_dSES, P.Value_dSES, adj.P.Val_dSES, Betadiff_dSES) %>%
+                       dplyr::rename(t = 2,
+                                     P.Value = 3,
+                                     adj.P.Val = 4,
+                                     Betadiff = 5) %>%
+                       dplyr::mutate(Comparison = "Delta SES")) %>%
+  dplyr::rows_append(dmps_continuous_ust %>%
+                       dplyr::filter(CGID %in% predictor_cpgs_ust$CpG) %>%
+                       dplyr::select(CGID, t_dHBI, P.Value_dHBI, adj.P.Val_dHBI, Betadiff_dHBI) %>%
+                       dplyr::rename(t = 2,
+                                     P.Value = 3,
+                                     adj.P.Val = 4,
+                                     Betadiff = 5) %>%
+                       dplyr::mutate(Comparison = "Delta HBI")) %>%
+  dplyr::rows_append(dmps_continuous_ust %>%
+                       dplyr::filter(CGID %in% predictor_cpgs_ust$CpG) %>%
+                       dplyr::select(CGID, t_dlogCRP, P.Value_dlogCRP, adj.P.Val_dlogCRP, Betadiff_dlogCRP) %>%
+                       dplyr::rename(t = 2,
+                                     P.Value = 3,
+                                     adj.P.Val = 4,
+                                     Betadiff = 5) %>%
+                       dplyr::mutate(Comparison = "Delta CRP")) 
+  # dplyr::rows_append(dmps_continuous_ust %>%
+  #                      dplyr::filter(CGID %in% predictor_cpgs_ust$CpG) %>%
+  #                      dplyr::select(CGID, t_dCalprotectin, P.Value_dCalprotectin, adj.P.Val_dCalprotectin, Betadiff_dCalprotectin) %>%
+  #                      dplyr::rename(t = 2,
+  #                                    P.Value = 3,
+  #                                    adj.P.Val = 4,
+  #                                    Betadiff = 5) %>%
+  #                      dplyr::mutate(Comparison = "Delta fecal calprotectin"))
+
+boxplot_continuous_pval_ust_ggplotobj <- dmps_aggregated_ust %>%
+  ggplot(aes(x = Comparison, y = -log10(P.Value)),) +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_point(col = "#808080") +
+  geom_line(col = "#808080", aes(group = CGID)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  labs(title = "Ustekinumab") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())
+```
+
+```{r continuous analysis}
+continuous_analysisA_ggplotobj <- ggarrange(volcanoplot_ses_vdz_ggplotobj, volcanoplot_ses_ust_ggplotobj, nrow = 1, ncol = 2, align = "hv")
+continuous_analysisB_ggplotobj <- ggarrange(volcanoplot_hbi_vdz_ggplotobj, volcanoplot_hbi_ust_ggplotobj, nrow = 1, ncol = 2, align = "hv")
+continuous_analysisC_ggplotobj <- ggarrange(volcanoplot_logcrp_vdz_ggplotobj, volcanoplot_logcrp_ust_ggplotobj, nrow = 1, ncol = 2, align = "hv")
+continuous_analysisDE_ggplotobj <- ggarrange(boxplot_continuous_pval_vdz_ggplotobj, boxplot_continuous_pval_ust_ggplotobj, nrow = 1, ncol = 2, align = "hv", labels = c("D)", "E)"))
+
+continuous_analysis_ggplotobj <- ggarrange(continuous_analysisA_ggplotobj, continuous_analysisB_ggplotobj, continuous_analysisC_ggplotobj, continuous_analysisDE_ggplotobj, align = "hv", nrow = 2, ncol = 2, labels = c("A)", "B)", "C)"))
+
+pdf(fig6_pdf, width = 18, height = 10)
+print(continuous_analysis_ggplotobj)
+dev.off()
+```
+

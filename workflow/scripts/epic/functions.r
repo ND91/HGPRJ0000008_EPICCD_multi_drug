@@ -44,18 +44,20 @@ cpg_timeplot <- function(cgid, anno, betas, response, timepoint, donor, response
   return(gplot)
 }
 
-dmg_plot <- function(gene_of_interest, tophits_gr, xlim = NULL, ylim = NULL, significance = T, smooth = T, stat = "reduce"){
+dmg_plot <- function(gene_of_interest, beta_column, pval_column, significance_column, tophits_gr, xlim = NULL, ylim = NULL, significance = T, smooth = T, stat = "reduce"){
   require(ggbio)
   require(TxDb.Hsapiens.UCSC.hg19.knownGene)
   
   data(genesymbol, package = "biovizBase")
   
   cpgs <- tophits_gr[grep(paste0("(^|;)", as.character(gene_of_interest), "($|;)"), tophits_gr$UCSC_RefGene_Name),] 
+  
   cpgs$significant <- "NS"
-  cpgs$significant[cpgs$adj.P.Val<0.05] <- "Significant"
+  #cpgs$significant[data.frame(cpgs)[,pval_column]<0.05] <- "Significant"
+  cpgs$significant[data.frame(cpgs)[,significance_column] == "Significant"] <- "Significant"
   
   #methylation difference
-  mdiff_track <- ggplot(cpgs, aes(x = start, y = Beta)) +
+  mdiff_track <- ggplot(cpgs, aes(x = start, y = !!sym(beta_column))) +
     #geom_alignment() + 
     geom_hline(yintercept = 0) +
     #geom_line(alpha = 0.5) +
@@ -77,9 +79,11 @@ dmg_plot <- function(gene_of_interest, tophits_gr, xlim = NULL, ylim = NULL, sig
   }
   
   if(significance){
-    mdiff_track <- mdiff_track + geom_point(aes(fill = significant), shape = 21, alpha = 0.5)
+    mdiff_track <- mdiff_track + geom_point(aes(fill = significant, size = -log10(!!sym(pval_column))), shape = 21) +
+      labs(size = "-log10(pvalue)")
   } else{
-    mdiff_track <- mdiff_track + geom_point(alpha = 0.2) 
+    mdiff_track <- mdiff_track + geom_point(aes(size = -log10(!!sym(pval_column)))) +
+      labs(size = "-log10(pvalue)")
   }
   
   gene_track <- ggplot() + 

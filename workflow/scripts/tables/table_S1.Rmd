@@ -1,0 +1,80 @@
+---
+title: "Table S1"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-09'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(minfi)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+dmps_vdz_csv <- file.path(basepath, "output/epic/dmp/dmp_Vedolizumab_annotated.csv")
+icc_vdz_csv <- file.path(basepath, "output/epic/icc/icc_Vedolizumab.csv")
+```
+
+```{r outpaths}
+tablepath <- file.path(basepath, "output/tables/tableS1")
+dir.create(tablepath)
+
+table_predictorcpgs_t1_vdz_csv <- file.path(tablepath, "table_predictorcpgs_t1_vdz.csv")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+dmps_vdz <- read.csv(dmps_vdz_csv)
+
+icc_vdz <- read.csv(icc_vdz_csv)
+```
+
+```{r preparation}
+predictor_cpgs_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab")
+```
+
+## Table Predictor CpGs T1 VDZ
+
+```{r table predictorcpgs t1 vdz}
+table_predictorcpgs_t1_vdz <- dmps_vdz %>%
+  dplyr::filter(CGID %in% predictor_cpgs_vdz$CpG) %>% 
+  dplyr::mutate(Gene = paste0(UCSC_RefGene_Name, ";", GencodeCompV12_NAME, ";", Enhancer_gene),
+                Gene = unlist(lapply(strsplit(Gene, ";"), function(entry){
+                  unique_entry <- unique(entry)
+                  nona_entry <- unique_entry[-which(unique_entry %in% c("", "NA"))]
+                  nona_entry <- paste(nona_entry, collapse = "/")
+                  return(nona_entry)
+                })),
+                Feature = unlist(lapply(strsplit(GencodeCompV12_Group , ";"), function(entry){
+                  unique_entry <- unique(entry)
+                  # nona_entry <- unique_entry[-which(unique_entry %in% c("", "NA"))]
+                  nona_entry <- paste(unique_entry, collapse = "/")
+                  return(nona_entry)
+                }))) %>%
+  dplyr::select(CGID, Gene, chr_hg19, pos_hg19, Feature, Betadiff_T1RvNR, P.Value_T1RvNR) %>%
+  dplyr::left_join(icc_vdz %>%
+                     dplyr::select(X, icc, icc_lbound, icc_rbound) %>%
+                     dplyr::rename(CGID = X)) %>%
+  dplyr::rename(Chromosome = chr_hg19,
+                Position = pos_hg19,
+                ICC = icc,
+                ICC_lower = icc_lbound,
+                ICC_upper = icc_rbound) %>%
+  readr::write_csv(table_predictorcpgs_t1_vdz_csv)
+```
+
+## sessionInfo
+
+```{r sessionInfo}
+sessionInfo()
+```

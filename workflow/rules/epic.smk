@@ -1,6 +1,6 @@
 # External data
 
-# rule download_javierre2016:
+# rule dnam_download_javierre2016:
 #   params:
 #     javierre2016=config['javierre2016_pchic']
 #   output:
@@ -18,7 +18,7 @@
 #     wget -O '{output}' -o '{log}' '{params.javierre2016}' 
 #     """  
 
-# rule unzip_javierre2016:
+# rule dnam_unzip_javierre2016:
 #   input:
 #     "{basedir}/resources/pchic/javierre2016_sm.zip",
 #   output:
@@ -39,7 +39,9 @@
 
 # Preprocessing
 
-rule reinstall_preprocesscore:
+## This is necessary because the version of preprocessCore fails if it measures a multicore system. Need to reinstall it to force single core execution. 
+
+rule dnam_r_reinstall_preprocesscore:
   output:
     preprocesscore_installed="{basedir}/resources/preprocesscore.installed",
   conda:
@@ -59,7 +61,7 @@ rule reinstall_preprocesscore:
     Rscript --vanilla workflow/scripts/epic/reinstall_preprocesscore.r "{output.preprocesscore_installed}" &> "{log}"
     """  
 
-rule r_import:
+rule dnam_r_import:
   input:
     sample_metadata_xlsx=config['sample_metadata'],
     epic_files_xlsx=config['epic_files'],
@@ -83,7 +85,7 @@ rule r_import:
     Rscript --vanilla workflow/scripts/epic/import.r "{input.sample_metadata_xlsx}" "{input.epic_files_xlsx}" "{output.rgset_rds}" &> "{log}"
     """  
 
-rule r_qc:
+rule dnam_r_qc:
   input:
     rgset_rds="{basedir}/output/epic/import/rgset.Rds",
   output:
@@ -104,10 +106,10 @@ rule r_qc:
     basedir="{basedir}"
   shell:
     """
-    Rscript -e \"rmarkdown::render(input = 'workflow/scripts/epic/qc.Rmd', output_dir = 'output/epic/qc', knit_root_dir = '{params.basedir}', params = list(rgset_rds = '{input.rgset_rds}', rgset_qc_rds = '{output.rgset_qc_rds}'))\" &> "{log}"
+    Rscript --vanilla -e \"rmarkdown::render(input = 'workflow/scripts/epic/qc.Rmd', output_dir = 'output/epic/qc', knit_root_dir = '{params.basedir}', params = list(rgset_rds = '{input.rgset_rds}', rgset_qc_rds = '{output.rgset_qc_rds}'))\" &> "{log}"
     """
 
-rule r_subsetting_normalization:
+rule dnam_r_subsetting_normalization:
   input:
     rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
   output:
@@ -131,7 +133,7 @@ rule r_subsetting_normalization:
     Rscript --vanilla workflow/scripts/epic/subsetting_normalization.r "{input.rgset_qc}" "{output.gmset}" "{params.treatment}" &> "{log}"
     """
 
-rule r_epic_annotation:
+rule dnam_r_epic_annotation:
   input:
     activepromoters="{basedir}/resources/pchic/ActivePromoterEnhancerLinks.tsv",
   output:
@@ -155,7 +157,7 @@ rule r_epic_annotation:
  
 # EDA
 
-rule r_eda:
+rule dnam_r_eda:
   input:
     rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
   output:
@@ -178,11 +180,12 @@ rule r_eda:
 
 # Differential methylation analyses
 
-rule r_dmp_analyses:
+rule dnam_r_dmp_analyses:
   input:
     gmset="{basedir}/output/epic/subset/gmset_{treatment}.Rds",
   output:
     dmps="{basedir}/output/epic/dmp/dmp_{treatment}.csv",
+    #dmps_t1rvnr_wconfounders="{basedir}/output/epic/dmp/dmp_T1RvNR_wconfounders_{treatment}.csv",
   conda:
     "../envs/r-minfi.yaml"
   log:
@@ -200,7 +203,73 @@ rule r_dmp_analyses:
     Rscript --vanilla workflow/scripts/epic/dmp_analyses.r "{input.gmset}" "{output.dmps}" "{params.treatment}" &> "{log}"
     """
     
-rule r_dmr_analyses:
+rule dnam_r_dmp_T1RvNR_wconfounder_analyses:
+  input:
+    gmset="{basedir}/output/epic/subset/gmset_{treatment}.Rds",
+  output:
+    dmps="{basedir}/output/epic/dmp/dmp_T1RvNR_wconfounders_{treatment}.csv",
+  conda:
+    "../envs/r-minfi.yaml"
+  log:
+    "{basedir}/output/epic/dmp/r_dmp_T1RvNR_wconfounders_analyses_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/dmp/r_dmp_T1RvNR_wconfounders_analyses_{treatment}_benchmark.txt",
+  resources:
+    mem_mb=40000,
+  params:
+    treatment="{treatment}"
+  message:
+    "--- Perform differential methylation analysis on the Illumina HumanMethylation EPIC data correcting for age, sex, and blood cell distribution ---"
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/dmp_analyses_T1RvNR_wconfounders.r "{input.gmset}" "{output.dmps}" "{params.treatment}" &> "{log}"
+    """
+
+rule dnam_r_dmp_T1CRP_analyses:
+  input:
+    gmset="{basedir}/output/epic/subset/gmset_{treatment}.Rds",
+  output:
+    dmps="{basedir}/output/epic/dmp/dmp_T1CRP_{treatment}.csv",
+  conda:
+    "../envs/r-minfi.yaml"
+  log:
+    "{basedir}/output/epic/dmp/r_dmp_T1CRP_analyses_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/dmp/r_dmp_T1CRP_analyses_{treatment}_benchmark.txt",
+  resources:
+    mem_mb=40000,
+  params:
+    treatment="{treatment}"
+  message:
+    "--- Perform differential methylation analysis on the Illumina HumanMethylation EPIC data comparing CRP at T1 ---"
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/dmp_analyses_T1CRP.r "{input.gmset}" "{output.dmps}" "{params.treatment}" &> "{log}"
+    """
+    
+rule dnam_r_dmp_T1FCP_analyses:
+  input:
+    gmset="{basedir}/output/epic/subset/gmset_{treatment}.Rds",
+  output:
+    dmps="{basedir}/output/epic/dmp/dmp_T1FCP_{treatment}.csv",
+  conda:
+    "../envs/r-minfi.yaml"
+  log:
+    "{basedir}/output/epic/dmp/r_dmp_T1FCP_analyses_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/dmp/r_dmp_T1FCP_analyses_{treatment}_benchmark.txt",
+  resources:
+    mem_mb=40000,
+  params:
+    treatment="{treatment}"
+  message:
+    "--- Perform differential methylation analysis on the Illumina HumanMethylation EPIC data comparing FCP at T1 ---"
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/dmp_analyses_T1FCP.r "{input.gmset}" "{output.dmps}" "{params.treatment}" &> "{log}"
+    """
+
+rule dnam_r_dmr_analyses:
   input:
     gmset="{basedir}/output/epic/subset/gmset_{treatment}.Rds",
   output:
@@ -224,14 +293,14 @@ rule r_dmr_analyses:
     Rscript --vanilla workflow/scripts/epic/dmr_analyses.r "{input.gmset}" "{output.dmrcate_rds}" "{params.treatment}" "{params.comparison}" "{params.dmr_csv}" &> "{log}"
     """
 
-rule r_dmg_analysis:
+rule dnam_r_dmg_analysis:
   input:
     dmps_anno="{basedir}/output/epic/dmp/dmp_{treatment}_annotated.csv",
     gmset="{basedir}/output/epic/subset/gmset_{treatment}.Rds",
   output:
     dmgs="{basedir}/output/epic/dmg/dmg_{comparison}_{treatment}.csv",
   conda:
-    "../envs/r-minfi.yaml"
+    "../envs/r-dmg.yaml"
   log:
     "{basedir}/output/epic/dmg/r_dmg_analysis_{comparison}_{treatment}.log",
   benchmark:
@@ -247,7 +316,7 @@ rule r_dmg_analysis:
     Rscript --vanilla workflow/scripts/epic/dmg_analyses.r "{input.dmps_anno}" "{input.gmset}" "{output.dmgs}" "{params.comparison}" &> "{log}"
     """
 
-rule r_icc_analysis:
+rule dnam_r_icc_analysis:
   input:
     gmset="{basedir}/output/epic/subset/gmset_{treatment}.Rds",
   output:
@@ -271,7 +340,7 @@ rule r_icc_analysis:
 
 # Interpreting differential methylation analyses
 
-rule r_dmp_annotation:
+rule dnam_r_dmp_annotation:
   input:
     dmps="{basedir}/output/epic/dmp/dmp_{treatment}.csv",
     epic_annotation_csv="{basedir}/resources/epic_annotations.csv",
@@ -292,18 +361,18 @@ rule r_dmp_annotation:
     Rscript --vanilla workflow/scripts/epic/dmp_annotation.r "{input.dmps}" "{input.epic_annotation_csv}" "{output.dmps_anno}" &> {log}
     """
 
-rule r_dmp_ora:
+rule dnam_r_dmp_ora:
   input:
     dmps_anno="{basedir}/output/epic/dmp/dmp_{treatment}_annotated.csv",
   output:
-    ora_kegg="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_kegg.csv",
+    #ora_kegg="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_kegg.csv",
     ora_go="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_go.csv",
-    ora_promhyper_kegg="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_promhyper_kegg.csv",
+    #ora_promhyper_kegg="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_promhyper_kegg.csv",
     ora_promhyper_go="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_promhyper_go.csv",
-    ora_promhypo_kegg="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_promhypo_kegg.csv",
+    #ora_promhypo_kegg="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_promhypo_kegg.csv",
     ora_promhypo_go="{basedir}/output/epic/dmp/ora/dmp_{comparison}_{treatment}_ora_promhypo_go.csv",
   conda:
-    "../envs/r-minfi.yaml"
+    "../envs/r-missmethyl.yaml"
   log:
     "{basedir}/output/epic/dmp/r_dmp_ora_{comparison}_{treatment}.log",
   benchmark:
@@ -316,12 +385,12 @@ rule r_dmp_ora:
     comparison="{comparison}",
   shell:
     """
-    Rscript --vanilla workflow/scripts/epic/dmp_ora.r "{input.dmps_anno}" "{output.ora_kegg}" "{output.ora_go}" "{output.ora_promhyper_kegg}" "{output.ora_promhyper_go}" "{output.ora_promhypo_kegg}" "{output.ora_promhypo_go}" "{params.comparison}" &> "{log}"
+    Rscript --vanilla workflow/scripts/epic/dmp_ora.r "{input.dmps_anno}" "{output.ora_go}" "{output.ora_promhyper_go}" "{output.ora_promhypo_go}" "{params.comparison}" &> "{log}"
     """
 
 # Preparation HORAIZON machine learning
 
-rule r_preparation_horaizon_training:
+rule dnam_r_preparation_horaizon_training:
   input:
     rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
   output:
@@ -346,7 +415,7 @@ rule r_preparation_horaizon_training:
     Rscript --vanilla workflow/scripts/epic/preparation_ml_training.r "{input.rgset_qc}" "{params.treatment}" "{output.X}" "{output.y}" &> "{log}"
     """
 
-rule r_preparation_horaizon_validation:
+rule dnam_r_preparation_horaizon_validation:
   input:
     rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
   output:
@@ -371,7 +440,7 @@ rule r_preparation_horaizon_validation:
     Rscript --vanilla workflow/scripts/epic/preparation_ml_validation.r "{input.rgset_qc}" "{params.treatment}" "{output.X}" "{output.y}" &> "{log}"
     """
 
-rule r_preparation_horaizon_timepoint2_validation:
+rule dnam_r_preparation_horaizon_timepoint2_validation:
   input:
     rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
   output:
@@ -396,7 +465,7 @@ rule r_preparation_horaizon_timepoint2_validation:
     Rscript --vanilla workflow/scripts/epic/preparation_ml_timepoint2_validation.r "{input.rgset_qc}" "{params.treatment}" "{output.X}" "{output.y}" &> "{log}"
     """
 
-rule r_preparation_horaizon_multibiological_validation:
+rule dnam_r_preparation_horaizon_multibiological_validation:
   input:
     rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
   output:
@@ -421,9 +490,34 @@ rule r_preparation_horaizon_multibiological_validation:
     Rscript --vanilla workflow/scripts/epic/preparation_ml_multibiological_validation.r "{input.rgset_qc}" "{params.treatment}" "{output.X}" "{output.y}" &> "{log}"
     """
 
+rule dnam_r_preparation_horaizon_validation_regressedconfounders:
+  input:
+    rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
+  output:
+    X="{basedir}/output/epic/horaizon/validation_regressedconfounders/X_{treatment}.csv",
+    y="{basedir}/output/epic/horaizon/validation_regressedconfounders/metadata_{treatment}.csv",
+  conda:
+    "../envs/r-minfi.yaml"
+  log:
+    "{basedir}/output/epic/horaizon/validation_regressedconfounders/r_preparation_horaizon_multibiological_validation_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/horaizon/validation_regressedconfounders/r_preparation_horaizon_multibiological_validation_{treatment}_benchmark.txt",
+  threads: 
+    1
+  resources:
+    mem_mb=50000,
+  message:
+    "--- Preparevalidation data with confounder CpGs regressed out for Horaizon for {params.treatment} ---"
+  params:
+    treatment="{treatment}",
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/preparation_ml_regressedconfounders_validation.r "{input.rgset_qc}" "{params.treatment}" "{output.X}" "{output.y}" &> "{log}"
+    """
+
 # Interpreting HORAIZON machine learning results
 
-# rule r_horaizon_markers_cdpbmethlts:
+# rule dnam_r_horaizon_markers_cdpbmethlts:
 #   input:
 #     horaizon_markers_csv=config["horaizon_markers"],
 #     cdpbmethlts_xlsx=config["cdpbmethlts"],
@@ -446,3 +540,123 @@ rule r_preparation_horaizon_multibiological_validation:
 #     """
 #     Rscript --vanilla workflow/scripts/epic/ml_lts_interrogation.r "{input.horaizon_markers_csv}" "{input.cdpbmethlts_xlsx}" "{params.treatment}" "{output.horaizon_markers_cdpbmethlts_ICC_csv}" "{output.horaizon_markers_cdpbmethlts_ICC_pdf}" &> "{log}"
 #     """
+
+rule dnam_r_horaizon_predictor_ora:
+  input:
+    horaizon_predictors_xlsx=config['horaizon_markers'],
+  output:
+    predictor_ora_go="{basedir}/output/epic/horaizon/ora/predictor_{treatment}_ora_go.csv",
+  conda:
+    "../envs/r-missmethyl.yaml"
+  log:
+    "{basedir}/output/epic/horaizon/r_horaizon_predictor_ora_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/horaizon/r_horaizon_predictor_ora_{treatment}_benchmark.txt",
+  resources:
+    mem_mb=40000,
+  message:
+    "--- Perform gene set overrepresentation analyses on the Horaizon predictor CpGs ---"
+  params:
+    treatment="{treatment}",
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/ml_predictor_ora.r "{input.horaizon_predictors_xlsx}" "{output.predictor_ora_go}" "{params.treatment}" &> "{log}"
+    """
+
+# Reviewer
+
+rule dnam_r_dmp_continuous_analyses:
+  input:
+    gmset="{basedir}/output/epic/subset/gmset_{treatment}.Rds",
+  output:
+    dmps="{basedir}/output/epic/dmp/dmp_continuous_{treatment}.csv",
+  conda:
+    "../envs/r-minfi.yaml"
+  log:
+    "{basedir}/output/epic/dmp/dnam_r_dmp_continuous_analyses_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/dmp/dnam_r_dmp_continuous_analyses_{treatment}_benchmark.txt",
+  resources:
+    mem_mb=40000,
+  params:
+    treatment="{treatment}"
+  message:
+    "--- Perform differential methylation analysis on the Illumina HumanMethylation EPIC data using the differences between T2 and T1 on a continuous scale as independent variable---"
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/dmp_analyses_continuous.r "{input.gmset}" "{output.dmps}" "{params.treatment}" &> "{log}"
+    """
+
+rule dnam_r_priorantitnf_analyses:
+  input:
+    rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
+  output:
+    glmmodel_rds="{basedir}/output/epic/metadata/priorantitnf_glmmodel_{treatment}_discovery.Rds",
+    summary_glmmodel_txt="{basedir}/output/epic/metadata/priorantitnf_summary_glmmodel_{treatment}_discovery.Rds",
+    validation_predictions_csv="{basedir}/output/epic/metadata/priorantitnf_summary_glmmodel_{treatment}_predictions_validation.csv",
+  conda:
+    "../envs/r-minfi.yaml"
+  log:
+    "{basedir}/output/epic/metadata/dnam_r_priorantitnf_analyses_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/metadata/dnam_r_priorantitnf_analyses_{treatment}_benchmark.txt",
+  resources:
+    mem_mb=40000,
+  message:
+    "--- Perform classification analyses using prior anti-TNF exposure as predictor for response ---"
+  params:
+    treatment="{treatment}",
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/priorantitnf_analyses.r "{input.rgset_qc}" "{params.treatment}" "{output.glmmodel_rds}" "{output.summary_glmmodel_txt}" "{output.validation_predictions_csv}" &> "{log}"
+    """
+
+rule dnam_r_preparation_horaizon_ancillary_validation:
+  input:
+    rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
+  output:
+    X="{basedir}/output/epic/horaizon/ancillary_validation/X_{treatment}.csv",
+    y="{basedir}/output/epic/horaizon/ancillary_validation/metadata_{treatment}.csv",
+  conda:
+    "../envs/r-minfi.yaml"
+  log:
+    "{basedir}/output/epic/horaizon/ancillary_validation/dnam_r_preparation_horaizon_ancillary_validation_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/horaizon/ancillary_validation/dnam_r_preparation_horaizon_ancillary_validation_{treatment}_benchmark.txt",
+  threads: 
+    1
+  resources:
+    mem_mb=50000,
+  message:
+    "--- Prepare ancillary validation data for Horaizon for {params.treatment} ---"
+  params:
+    treatment="{treatment}",
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/preparation_ml_ancillary_validation.r "{input.rgset_qc}" "{params.treatment}" "{output.X}" "{output.y}" &> "{log}"
+    """
+
+rule dnam_r_preparation_horaizon_crossdrug_validation:
+  input:
+    rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
+  output:
+    X="{basedir}/output/epic/horaizon/crossdrug_validation/X_{treatment}.csv",
+    y="{basedir}/output/epic/horaizon/crossdrug_validation/metadata_{treatment}.csv",
+  conda:
+    "../envs/r-minfi.yaml"
+  log:
+    "{basedir}/output/epic/horaizon/crossdrug_validation/dnam_r_preparation_horaizon_crossdrug_validation_{treatment}.log",
+  benchmark:
+    "{basedir}/output/epic/horaizon/crossdrug_validation/dnam_r_preparation_horaizon_crossdrug_validation_{treatment}_benchmark.txt",
+  threads: 
+    1
+  resources:
+    mem_mb=50000,
+  message:
+    "--- Prepare crossdrug validation data for Horaizon for {params.treatment} ---"
+  params:
+    treatment="{treatment}",
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/epic/preparation_ml_crossdrug_validation.r "{input.rgset_qc}" "{params.treatment}" "{output.X}" "{output.y}" &> "{log}"
+    """

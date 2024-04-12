@@ -1,0 +1,15 @@
+channels:
+  - bioconda      
+  - conda-forge
+  - anaconda
+  - defaults
+  - r
+dependencies:
+  - r-biocmanager=1.30.20
+  - r-tidyverse=2.0.0
+  - r-ggrastr=1.0.2
+  - r-irr
+  - r-statmod
+  - bioconductor-minfi=1.44.0
+  - bioconductor-illuminahumanmethylationepicmanifest
+  - bioconductor-illuminahumanmethylationepicanno.ilm10b4.hg19

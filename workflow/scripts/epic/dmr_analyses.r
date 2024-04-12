@@ -20,10 +20,8 @@ dmr_csv_path <- args[5]
 gmset <- readRDS(gmset_path)
 
 prefix <- case_when(
-  treatment == "Adalimumab" ~ "ADA_",
   treatment == "Vedolizumab" ~ "VDZ_",
   treatment == "Ustekinumab" ~ "UST_",
-  treatment == "Infliximab" ~ "IFX_",
 )
 
 cohort_column <- paste0(prefix, "cohort")

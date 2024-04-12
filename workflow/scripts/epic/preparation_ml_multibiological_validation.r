@@ -1,5 +1,6 @@
 #!/usr/bin/env R
-# Prepare the validation data machine learning at HorAIzon. 
+# The goal is to train a model using DNA methylation data from the T1 discovery data (collected at the AmsterdamUMC) and to predict response in the multibiological failure cohort (collected at the AmsterdamUMC). 
+# Prepare the discovery + multibiological failure data for HorAIzon. 
 # The goal is to train on t1 from AmsterdamUMC (same as the training set) and generate predictions on Oxford validation data.
 # Normalize the data using functional normalization.
 # Remove the batch effects (run, slide, and batch).
@@ -23,21 +24,34 @@ y_path <- args[4]
 rgset <- readRDS(rgset_path)
 
 prefix <- case_when(
-  treatment == "Adalimumab" ~ "ADA_",
   treatment == "Vedolizumab" ~ "VDZ_",
   treatment == "Ustekinumab" ~ "UST_",
-  treatment == "Infliximab" ~ "IFX_",
 )
 
 cohort_column <- paste0(prefix, "cohort")
 timepoint_column <- paste0(prefix, "timepoint")
 response_column <- paste0(prefix, "response")
+response_type_column <- paste0(prefix, "response_type")
 
-mbf_samples <- pData(rgset) %>%
+#mbf_samples <- pData(rgset) %>%
+mbf_samples <- epic_metadata %>%
   data.frame() %>%
-  dplyr::filter(Center_source %in% "AmsterdamUMC",
+  dplyr::mutate(ADA_response_type_bin = as.numeric(as.factor(ADA_response_type)),
+                ADA_response_type_bin = ifelse(is.na(ADA_response_type_bin), 0, ADA_response_type_bin),
+                IFX_response_type_bin = as.numeric(as.factor(IFX_response_type)),
+                IFX_response_type_bin = ifelse(is.na(IFX_response_type_bin), 0, IFX_response_type_bin),
+                VDZ_response_type_bin = as.numeric(as.factor(VDZ_response_type)),
+                VDZ_response_type_bin = ifelse(is.na(VDZ_response_type_bin), 0, VDZ_response_type_bin),
+                UST_response_type_bin = as.numeric(as.factor(UST_response_type)),
+                UST_response_type_bin = ifelse(is.na(UST_response_type_bin), 0, UST_response_type_bin),
+                Nfails = ADA_response_type_bin+IFX_response_type_bin+VDZ_response_type_bin+UST_response_type_bin) %>%
+  dplyr::filter(Nfails > 1,
+                Center_source %in% "AmsterdamUMC",
+                !(!!sym(cohort_column) %in% c("EPIC-CD Discovery", "EPIC-CD Validation")),
                 !is.na(!!sym(response_column)),
-                !!sym(timepoint_column) == "T1" | is.na(!!sym(timepoint_column))) %>%
+                !!sym(response_type_column) == "Full",
+                !!sym(timepoint_column) == "T1" | is.na(!!sym(timepoint_column)),
+                Disease == "CD") %>%
   tibble::rownames_to_column(var = "arrayname") %>%
   dplyr::pull(arrayname)
 

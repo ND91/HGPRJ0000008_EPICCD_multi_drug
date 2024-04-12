@@ -18,10 +18,8 @@ treatment <- args[3]
 gmset <- readRDS(gmset_path)
 
 prefix <- case_when(
-  treatment == "Adalimumab" ~ "ADA_",
   treatment == "Vedolizumab" ~ "VDZ_",
   treatment == "Ustekinumab" ~ "UST_",
-  treatment == "Infliximab" ~ "IFX_",
 )
 
 cohort_column <- paste0(prefix, "cohort")
@@ -37,7 +35,7 @@ sample_metadata <- pData(gmset) %>%
                 DNA_plate = gsub("(-| )", "_", DNA_plate),
                 DNA_plate = gsub("\\[\\]", "", DNA_plate))
 
-design_mat <- model.matrix(~0 + resptime + Sex + Age + DNA_plate, data = sample_metadata)
+design_mat <- model.matrix(~0 + resptime + DNA_plate, data = sample_metadata)
 
 colnames(design_mat)[1:4] <- c("T1_NR", "T2_NR", "T1_R", "T2_R")
 
@@ -91,6 +89,16 @@ dmps <- data.frame(topTable(mvals_ebayes, coef = "T1RvNR", number = "Inf", adjus
   dplyr::left_join(data.frame(topTable(mvals_ebayes, coef = "RT2vT1", number = "Inf", adjust.method = "BH")) %>%
                      dplyr::rename(Mdiff = logFC) %>%
                      dplyr::rename_with(function(cname){paste0(cname, "_RT2vT1")}) %>%
+                     tibble::rownames_to_column(var = "CGID"),
+                   by = "CGID") %>%
+  dplyr::left_join(data.frame(topTable(mvals_ebayes, coef = "NRT2vT1", number = "Inf", adjust.method = "BH")) %>%
+                     dplyr::rename(Mdiff = logFC) %>%
+                     dplyr::rename_with(function(cname){paste0(cname, "_NRT2vT1")}) %>%
+                     tibble::rownames_to_column(var = "CGID"),
+                   by = "CGID") %>%
+  dplyr::left_join(data.frame(topTable(mvals_ebayes, coef = "T2vT1", number = "Inf", adjust.method = "BH")) %>%
+                     dplyr::rename(Mdiff = logFC) %>%
+                     dplyr::rename_with(function(cname){paste0(cname, "_T2vT1")}) %>%
                      tibble::rownames_to_column(var = "CGID"),
                    by = "CGID") %>%
   dplyr::left_join(data.frame(coefficients(betas_ebayes)) %>%

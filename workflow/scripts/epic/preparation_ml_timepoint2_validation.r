@@ -1,6 +1,6 @@
 #!/usr/bin/env R
 # Prepare the t1 and t2 data for machine learning at HorAIzon.
-# The goal is to train on t1 from AmsterdamUMC (same as the training set) and generate predictions on t2.
+# The goal is to train on t1 and generate predictions on t2.
 # Normalize the data using functional normalization.
 # Remove the batch effects (run, slide, and batch).
 
@@ -23,10 +23,8 @@ y_path <- args[4]
 rgset <- readRDS(rgset_path)
 
 prefix <- case_when(
-  treatment == "Adalimumab" ~ "ADA_",
   treatment == "Vedolizumab" ~ "VDZ_",
   treatment == "Ustekinumab" ~ "UST_",
-  treatment == "Infliximab" ~ "IFX_",
 )
 
 cohort_column <- paste0(prefix, "cohort")
@@ -35,7 +33,9 @@ response_column <- paste0(prefix, "response")
 
 t1t2_donors <- pData(rgset) %>%
   data.frame() %>%
-  dplyr::filter(!!sym(timepoint_column) %in% c("T1", "T2")) %>%
+  dplyr::filter(!!sym(timepoint_column) %in% c("T1", "T2"),
+                !is.na(!!sym(response_column)),
+                Disease == "CD") %>%
   dplyr::group_by(DonorID) %>%
   summarize(n = n()) %>%
   dplyr::filter(n == 2,

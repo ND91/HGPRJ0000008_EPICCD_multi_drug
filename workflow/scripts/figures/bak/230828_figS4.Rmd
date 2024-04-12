@@ -1,0 +1,142 @@
+---
+title: "Figure S4"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-28'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(ggrastr)
+library(ggpubr)
+library(ggrepel)
+library(minfi)
+```
+
+```{r paths}
+horaizon_predictor_probes_xlsx <- "config/horaizon/predictor_cpgs.xlsx"
+
+dmps_t1crp_vdz_csv <- "output/epic/dmp/dmp_T1CRP_Vedolizumab.csv"
+dmps_t1crp_ust_csv <- "output/epic/dmp/dmp_T1CRP_Ustekinumab.csv"
+dmps_t1fcp_vdz_csv <- "output/epic/dmp/dmp_T1FCP_Vedolizumab.csv"
+dmps_t1fcp_ust_csv <- "output/epic/dmp/dmp_T1FCP_Ustekinumab.csv"
+
+gmset_vdz_rds <- "output/epic/subset/gmset_Vedolizumab.Rds"
+gmset_ust_rds <- "output/epic/subset/gmset_Ustekinumab.Rds"
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+dmps_t1crp_vdz <- read.csv(dmps_t1crp_vdz_csv)
+dmps_t1crp_ust <- read.csv(dmps_t1crp_ust_csv)
+dmps_t1fcp_vdz <- read.csv(dmps_t1fcp_vdz_csv)
+dmps_t1fcp_ust <- read.csv(dmps_t1fcp_ust_csv)
+```
+
+```{r predictors}
+horaizon_predictor_probes_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab")
+
+horaizon_predictor_probes_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab")
+```
+
+```{r figS4A}
+figS4A <- dmps_t1crp_vdz %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% horaizon_predictor_probes_vdz$CpG, "Predictor", NA),
+                label = ifelse(CGID %in% horaizon_predictor_probes_vdz$CpG & P.Value<0.05, CGID, NA)) %>%
+  ggplot(aes(x = Mdiff, y = -log10(P.Value))) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(Predictor == "Predictor"), 
+                  col = "#000000") +
+  geom_label_repel(aes(label = label), max.overlaps = Inf) +
+  labs(title = "Vedolizumab",
+       subtitle = "CRP at T1",
+       x = "Difference %Methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r figS4B}
+figS4B <- dmps_t1crp_ust %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% horaizon_predictor_probes_ust$CpG, "Predictor", NA),
+                label = ifelse(CGID %in% horaizon_predictor_probes_ust$CpG & P.Value<0.05, CGID, NA)) %>%
+  ggplot(aes(x = Mdiff, y = -log10(P.Value))) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(Predictor == "Predictor"), 
+                  col = "#000000") +
+  geom_label_repel(aes(label = label), max.overlaps = Inf) +
+  labs(title = "Ustekinumab",
+       subtitle = "CRP at T1",
+       x = "Difference %Methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r figS4C}
+figS4C <- dmps_t1fcp_vdz %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% horaizon_predictor_probes_vdz$CpG, "Predictor", NA),
+                label = ifelse(CGID %in% horaizon_predictor_probes_vdz$CpG & P.Value<0.05, CGID, NA)) %>%
+  ggplot(aes(x = Mdiff, y = -log10(P.Value))) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(Predictor == "Predictor"), 
+                  col = "#000000") +
+  geom_label_repel(aes(label = label), max.overlaps = Inf) +
+  labs(title = "Vedolizumab",
+       subtitle = "Fecal calprotectin at T1",
+       x = "Difference %Methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r figS4D}
+figS4D <- dmps_t1fcp_ust %>%
+  dplyr::mutate(Predictor = ifelse(CGID %in% horaizon_predictor_probes_ust$CpG, "Predictor", NA),
+                label = ifelse(CGID %in% horaizon_predictor_probes_ust$CpG & P.Value<0.05, CGID, NA)) %>%
+  ggplot(aes(x = Mdiff, y = -log10(P.Value))) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(Predictor == "Predictor"), 
+                  col = "#000000") +
+  geom_label_repel(aes(label = label), max.overlaps = Inf) +
+  labs(title = "Ustekinumab",
+       subtitle = "Fecal calprotectin at T1",
+       x = "Difference %Methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+```{r figS4}
+figS4 <- ggarrange(figS4A, figS4B, figS4C, figS4D, nrow = 2, ncol = 2, labels = c("A", "B", "C", "D"))
+
+pdf("docs/figures/figS4/figS4.pdf", width = 12, height = 12)
+print(figS4)
+dev.off()
+```

@@ -1,5 +1,5 @@
 #!/usr/bin/env R
-# Prepare the data for machine learning at HorAIzon. 
+# Prepare the discovery data from AmsterdamUMC for machine learning at HorAIzon. 
 # Normalize the data using functional normalization.
 # Remove the batch effects (run, slide, and batch).
 # Subset the data to T1, remove the SNPs (both catalogued as well as predicted), allosomes
@@ -23,10 +23,8 @@ y_path <- args[4]
 rgset <- readRDS(rgset_qc_path)
 
 prefix <- case_when(
-  treatment == "Adalimumab" ~ "ADA_",
   treatment == "Vedolizumab" ~ "VDZ_",
   treatment == "Ustekinumab" ~ "UST_",
-  treatment == "Infliximab" ~ "IFX_",
 )
 
 cohort_column <- paste0(prefix, "cohort")
@@ -37,7 +35,9 @@ t1_discval_samples <- pData(rgset) %>%
   data.frame() %>%
   dplyr::filter(!!sym(timepoint_column) %in% c("T1"),
                 !!sym(cohort_column) %in% c("EPIC-CD Discovery", "EPIC-CD Validation"),
-                Center_source == "AmsterdamUMC") %>%
+                !is.na(!!sym(response_column)),
+                Center_source == "AmsterdamUMC",
+                Disease == "CD") %>%
   tibble::rownames_to_column(var = "arrayname") %>%
   dplyr::pull(arrayname)
 

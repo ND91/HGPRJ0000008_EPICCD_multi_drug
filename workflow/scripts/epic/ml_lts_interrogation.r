@@ -1,15 +1,13 @@
 #!/usr/bin/env R
-# Prepare the data for machine learning at HorAIzon. 
-# Normalize the data using functional normalization.
-# Remove the batch effects (run, slide, and batch).
+# Extract the ICC values for the predictor CpGs from Joustra et al. 2022 (DOI: 10.1016/j.jcmgh.2022.12.011).
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 4) {
   stop(paste0("Script needs 4 arguments. Current input is:", args))
 }
 
-suppressPackageStartupMessages(library(ggplot2))
-suppressPackageStartupMessages(library(dplyr))
+library(ggplot2)
+library(dplyr)
 
 horaizon_markers_path <- args[1]
 cdpbmethlts_path <- args[2]
@@ -36,7 +34,6 @@ ggplot(horaizon_markers_icc, aes(x = ICC, y = Biological)) +
         panel.grid.minor = element_blank(),
         axis.title.y = element_blank())
 dev.off()
-
 
 # Save data
 write.csv(data.frame(horaizon_markers_icc), horaizon_markers_cdpbmethlts_ICC_csv, row.names = T)

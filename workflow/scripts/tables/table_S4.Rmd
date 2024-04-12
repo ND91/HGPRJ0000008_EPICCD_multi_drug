@@ -1,0 +1,62 @@
+---
+title: "Table S4"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-09'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(minfi)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+dmps_vdz_csv <- file.path(basepath, "output/epic/dmp/dmp_Vedolizumab_annotated.csv")
+degs_vdz_csv <- file.path(basepath, "output/rnaseq/degs/degs_Vedolizumab.csv")
+```
+
+```{r outpaths}
+tablepath <- file.path(basepath, "output/tables/tableS4")
+dir.create(tablepath)
+
+table_predictorcpggenes_t1_vdz_csv <- file.path(tablepath, "table_predictorcpggenes_t1_vdz.csv")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+dmps_vdz <- read.csv(dmps_vdz_csv)
+degs_vdz <- read.csv(degs_vdz_csv)
+```
+
+```{r preparation}
+predictor_cpgs_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab") %>%
+  dplyr::left_join(dmps_vdz, by = c("CpG" = "CGID")) %>%
+  dplyr::mutate(Gene = gsub(";NA", "", paste0(UCSC_RefGene_Name, ";", Enhancer_gene)))
+predictor_genes_vdz <- unlist(lapply(strsplit(paste0(predictor_cpgs_vdz$UCSC_RefGene_Name, ";", predictor_cpgs_vdz$Enhancer_gene), ";"), unique))
+predictor_genes_vdz <- predictor_genes_vdz[!predictor_genes_vdz %in% c("NA", "")]
+```
+
+## Table predictor CpG-associated genes VDZ
+
+```{r table predictorcpgs t1 vdz}
+predictor_degs_vdz <- degs_vdz %>%
+  dplyr::select(ENSG, HGNC, log2FoldChange_T1RvNR, pvalue_T1RvNR) %>%
+  dplyr::filter(HGNC %in% predictor_genes_vdz) %>%
+  readr::write_csv(table_predictorcpggenes_t1_vdz_csv)
+```
+
+## sessionInfo
+
+```{r sessionInfo}
+sessionInfo()
+```

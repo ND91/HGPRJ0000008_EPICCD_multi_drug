@@ -6,6 +6,10 @@ if (length(args) != 2) {
   stop(paste0("Script needs 2 arguments. Current input is:", args))
 }
 
+### Ugly section start
+# The following section is super ugly, but I cannot seem to get conda to install the packages (without failing - they appear to conflict with one another). 
+# I tried packrat/renv, but that had its own issues. 
+
 # Install the Illumina HumanMethylation EPIC 10b5 (hg38) annotation
 if(!"IlluminaHumanMethylationEPICanno.ilm10b5.hg38" %in% rownames(installed.packages())){
   devtools::install_github("achilleasNP/IlluminaHumanMethylationEPICmanifest")
@@ -15,20 +19,35 @@ if(!"IlluminaHumanMethylationEPICanno.ilm10b5.hg38" %in% rownames(installed.pack
   require(IlluminaHumanMethylationEPICanno.ilm10b5.hg38)
 }
 
-# # Install dbSNP (version 155)
-# if(!"SNPlocs.Hsapiens.dbSNP151.GRCh38" %in% rownames(installed.packages())){
-#   BiocManager::install("SNPlocs.Hsapiens.dbSNP151.GRCh38")
-#   require(SNPlocs.Hsapiens.dbSNP151.GRCh38)
-# } else{
-#   require(SNPlocs.Hsapiens.dbSNP151.GRCh38)
-# }
+if(!"TxDb.Hsapiens.UCSC.hg19.knownGene" %in% rownames(installed.packages())){
+  BiocManager::install("TxDb.Hsapiens.UCSC.hg19.knownGene")
+  require(TxDb.Hsapiens.UCSC.hg19.knownGene)
+} else{
+  require(TxDb.Hsapiens.UCSC.hg19.knownGene)
+}
 
-suppressPackageStartupMessages(library(minfi))
-suppressPackageStartupMessages(library(dplyr))
-suppressPackageStartupMessages(library(TxDb.Hsapiens.UCSC.hg19.knownGene))
-suppressPackageStartupMessages(library(ChIPpeakAnno))
-suppressPackageStartupMessages(library(GenomicRanges))
-suppressPackageStartupMessages(library(org.Hs.eg.db))
+if(!"ChIPpeakAnno" %in% rownames(installed.packages())){
+  BiocManager::install("ChIPpeakAnno")
+  require(ChIPpeakAnno)
+} else{
+  require(ChIPpeakAnno)
+}
+
+if(!"org.Hs.eg.db" %in% rownames(installed.packages())){
+  BiocManager::install("org.Hs.eg.db")
+  require(org.Hs.eg.db)
+} else{
+  require(org.Hs.eg.db)
+}
+
+### Ugly section end
+
+library(minfi)
+library(dplyr)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(ChIPpeakAnno)
+library(GenomicRanges)
+library(org.Hs.eg.db)
 
 source("workflow/scripts/epic/functions.r")
 
@@ -41,15 +60,6 @@ epic_anno <- data.frame(epic_anno) %>%
   dplyr::filter(!is.na(CHR_hg38))
 
 epic_anno_hg38_gr <- makeGRangesFromDataFrame(epic_anno, keep.extra.columns = T, seqnames.field = "CHR_hg38", start.field = "pos_hg38", end.field = "pos_hg38")
-
-# Updated genetic variants from dbSNP
-
-# epic_anno_hg38_gr <- epic_anno_hg38_gr+50
-# seqlevelsStyle(epic_anno_hg38_gr) <- seqlevelsStyle(SNPlocs.Hsapiens.dbSNP151.GRCh38)
-# 
-# epic_anno_hg38_gr_snps <- snpsByOverlaps(x = SNPlocs.Hsapiens.dbSNP151.GRCh38, ranges = epic_anno_hg38_gr)
-#  
-# epic_anno_hg38_snp_overlap <- findOverlaps(epic_anno_hg38_gr, epic_anno_hg38_gr_snps)
 
 # Append better enhancer annotations
 

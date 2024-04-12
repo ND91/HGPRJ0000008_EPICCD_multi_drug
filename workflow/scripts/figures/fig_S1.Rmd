@@ -1,0 +1,123 @@
+---
+title: "Figure S1"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-28'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(ggrastr)
+library(ggpubr)
+library(minfi)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+dmps_vdz_csv <- file.path(basepath, "output/epic/dmp/dmp_Vedolizumab.csv")
+icc_vdz_csv <- file.path(basepath, "output/epic/icc/icc_Vedolizumab.csv")
+gmset_vdz_rds <- file.path(basepath, "output/epic/subset/gmset_Vedolizumab.Rds")
+
+functions_figures_r <- file.path(basepath, "workflow/scripts/figures/functions_figures.R")
+```
+
+```{r outpaths}
+figpath <- file.path(basepath, "output/figures/figS1")
+dir.create(figpath)
+
+fig_boxplot_rvnrvt2vt1_vdz_predictorcpgs_pdf <- file.path(figpath, "fig_boxplot_rvnrvt2vt1_vdz_predictorcpgs.pdf")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+icc_vdz <- read.csv(icc_vdz_csv) %>%
+  dplyr::rename(CGID = X)
+
+gmset_vdz <- readRDS(gmset_vdz_rds)
+
+dmps_vdz <- read.csv(dmps_vdz_csv)
+
+source(functions_figures_r)
+```
+
+```{r colors}
+response_cols <- c("R" = "#61FF69",
+                   "NR" = "#FF6961")
+cohort_colors <- c("Discovery" = "#D55E00",
+                   "Validation" = "#0072B2")
+criteria_colors <- c("Partial" = "#CC79A7",
+                     "Full" = "#56B4E9")
+atnf_colors <- c("Exposed" = "#999999",
+                 "Non-exposed" = "#F0E442")
+timepoint_colors <- c("T1" = "#D3D3D3",
+                      "T2" = "#000000")
+timepoint_sig_colors <- c("NS" = "#000000",
+                          "T1" = "#FF0000",
+                          "T2" = "#0000FF",
+                          "T1&T2" = "#800080")
+model_colors <- c("Uncorrected" = "#D3D3D3",
+                  "Corrected" = "#000000")
+```
+
+```{r preparation}
+horaizon_predictor_probes_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab")
+
+beta_vdz <- getBeta(gmset_vdz)
+anno_vdz <- getAnnotation(gmset_vdz)
+```
+
+```{r testing}
+#Testing
+# cpg_summaryplot(cgid = "cg05303293",
+#                 anno = anno_vdz,
+#                 betas = beta_vdz,
+#                 response = pData(gmset_vdz)$VDZ_response,
+#                 timepoint = pData(gmset_vdz)$VDZ_timepoint,
+#                 donor = pData(gmset_vdz)$DonorID,
+#                 dmp_results = dmps_vdz,
+#                 icc_results = icc_vdz,
+#                 response_cols)
+```
+
+## Figure boxplot predictor CpGs RvNRvT2vT1
+
+```{r fig boxplot rvnrvt2vt1 vdz predictorcpgs pdf}
+boxplot_rvnrvt2vt1_vdz_predictorcpgs_ggplotobj_list <- lapply(horaizon_predictor_probes_vdz$CpG, function(CGID){
+  cpg_summaryplot(cgid = CGID, 
+                  anno = anno_vdz, 
+                  betas = beta_vdz, 
+                  icc_results = icc_vdz,
+                  response = pData(gmset_vdz)$VDZ_response, 
+                  timepoint = pData(gmset_vdz)$VDZ_timepoint, 
+                  donor = pData(gmset_vdz)$DonorID,
+                  response_cols = response_cols,
+                  dmp_results = dmps_vdz)
+})
+
+boxplot_rvnrvt2vt1_vdz_predictorcpgs_ggplotobj <- ggarrange(plotlist = boxplot_rvnrvt2vt1_vdz_predictorcpgs_ggplotobj_list, 
+                                                            ncol = 5, 
+                                                            nrow = 5, 
+                                                            legend = "bottom", 
+                                                            common.legend = T)
+
+boxplot_rvnrvt2vt1_vdz_predictorcpgs_ggplotobj <- annotate_figure(boxplot_rvnrvt2vt1_vdz_predictorcpgs_ggplotobj, 
+                                                                  left = "% methylation")
+
+pdf(width = 20, height = 30, file = fig_boxplot_rvnrvt2vt1_vdz_predictorcpgs_pdf)
+print(boxplot_rvnrvt2vt1_vdz_predictorcpgs_ggplotobj)
+dev.off()
+```
+
+## sessionInfo
+
+```{r sessioninfo}
+sessionInfo()
+```

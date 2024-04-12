@@ -1,0 +1,253 @@
+---
+title: "Figure S3"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-28'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(minfi)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(plotROC)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictions_vdz_discovery_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_discovery.xlsx")
+horaizon_predictions_vdz_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Vedolizumab_validation.xlsx")
+horaizon_predictions_ust_discovery_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_discovery.xlsx")
+horaizon_predictions_ust_validation_xlsx <- file.path(basepath, "config/horaizon/predictions_Ustekinumab_validation.xlsx")
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+sample_metadata_xlsx <- file.path(basepath, "config/samples/sample_metadata.xlsx")
+```
+
+```{r outpaths}
+figpath <- file.path(basepath, "output/figures/figS3")
+dir.create(figpath)
+
+fig_rocplot_t1_responsecriteria_vdz_pdf <- file.path(figpath, "fig_rocplot_t1_responsecriteria_vdz.pdf")
+fig_rocplot_t1_responsecriteria_ust_pdf <- file.path(figpath, "fig_rocplot_t1_responsecriteria_ust.pdf")
+fig_rocplot_t1_priorantitnf_vdz_pdf <- file.path(figpath, "fig_rocplot_t1_priorantitnf_vdz.pdf")
+fig_rocplot_t1_priorantitnf_ust_pdf <- file.path(figpath, "fig_rocplot_t1_priorantitnf_ust.pdf")
+```
+
+```{r import}
+horaizon_predictions_vdz_discovery <- readxl::read_excel(horaizon_predictions_vdz_discovery_xlsx, skip = 1) %>%
+  dplyr::mutate(Drug = "Vedolizumab",
+                Cohort = "Discovery")
+horaizon_predictions_vdz_validation <- readxl::read_excel(horaizon_predictions_vdz_validation_xlsx, skip = 1) %>%
+  dplyr::mutate(Drug = "Vedolizumab",
+                Cohort = "Validation")
+horaizon_predictions_ust_discovery <- readxl::read_excel(horaizon_predictions_ust_discovery_xlsx, skip = 1) %>%
+  dplyr::mutate(Drug = "Ustekinumab",
+                Cohort = "Discovery")
+horaizon_predictions_ust_validation <- readxl::read_excel(horaizon_predictions_ust_validation_xlsx, skip = 1) %>%
+  dplyr::mutate(Drug = "Ustekinumab",
+                Cohort = "Validation")
+
+sample_metadata <- readxl::read_excel(sample_metadata_xlsx)
+```
+
+```{r colors}
+response_cols <- c("R" = "#61FF69",
+                   "NR" = "#FF6961")
+cohort_colors <- c("Discovery" = "#D55E00",
+                   "Validation" = "#0072B2")
+criteria_colors <- c("Partial" = "#CC79A7",
+                     "Full" = "#56B4E9")
+atnf_colors <- c("Exposed" = "#999999",
+                 "Non-exposed" = "#F0E442")
+timepoint_colors <- c("T1" = "#D3D3D3",
+                      "T2" = "#000000")
+timepoint_sig_colors <- c("NS" = "#000000",
+                          "T1" = "#FF0000",
+                          "T2" = "#0000FF",
+                          "T1&T2" = "#800080")
+model_colors <- c("Uncorrected" = "#D3D3D3",
+                  "Corrected" = "#000000")
+```
+
+```{r t1 validation preparation}
+horaizon_t1_vdz_predictions_validation <- horaizon_predictions_vdz_discovery  %>%
+  dplyr::rows_append(horaizon_predictions_vdz_validation) %>%
+  dplyr::filter(Cohort == "Validation") %>%
+  dplyr::left_join(data.frame(sample_metadata[,c("SampleID", "VDZ_response", "VDZ_response_type", "Prior_aTNF_exposure")]) %>%
+                     dplyr::rename(Response = VDZ_response), 
+                   by = "SampleID") %>%
+  dplyr::mutate(Response_coded = ifelse(Response == "R", 1, 0),
+                Predicted_class_coded = ifelse(Predicted_class == "R", 1, 0)) 
+
+horaizon_t1_ust_predictions_validation <- horaizon_predictions_ust_discovery  %>%
+  dplyr::rows_append(horaizon_predictions_ust_validation) %>%
+  dplyr::filter(Cohort == "Validation") %>%
+  dplyr::left_join(data.frame(sample_metadata[,c("SampleID", "UST_response", "UST_response_type", "Prior_aTNF_exposure")]) %>%
+                     dplyr::rename(Response = UST_response), 
+                   by = "SampleID") %>%
+  dplyr::mutate(Response_coded = ifelse(Response == "R", 1, 0),
+                Predicted_class_coded = ifelse(Predicted_class == "R", 1, 0))
+```
+
+## Figure rocplot t1 validation responsetype
+
+```{r t1 validation responsetype statistics}
+horaizon_t1_vdz_predictions_validation_responsetype_confusion <- horaizon_t1_vdz_predictions_validation %>%
+  dplyr::mutate(type = case_when(
+    Predicted_class == "R" & Response == "R" ~ "tp",
+    Predicted_class == "NR" & Response == "NR" ~ "tn",
+    Predicted_class == "R" & Response == "NR" ~ "fp",
+    Predicted_class == "NR" & Response == "R" ~ "fn")) %>%
+  dplyr::group_by(VDZ_response_type) %>%
+  dplyr::count(type) %>%
+  tidyr::pivot_wider(names_from = type, values_from = n) %>%
+  dplyr::mutate(recall = tp/(tp+fn),
+                specificity = tn/(tn+fp),
+                sensitivity = tp/(tp+fn),
+                precision = tp/(tp+fp),
+                f1 = 2*(precision*recall)/(precision+recall),
+                lrp = sensitivity/(1-specificity)) 
+
+horaizon_t1_ust_predictions_validation_responsetype_confusion <- horaizon_t1_ust_predictions_validation %>%
+  dplyr::mutate(type = case_when(
+    Predicted_class == "R" & Response == "R" ~ "tp",
+    Predicted_class == "NR" & Response == "NR" ~ "tn",
+    Predicted_class == "R" & Response == "NR" ~ "fp",
+    Predicted_class == "NR" & Response == "R" ~ "fn")) %>%
+  dplyr::group_by(UST_response_type) %>%
+  dplyr::count(type) %>%
+  tidyr::pivot_wider(names_from = type, values_from = n) %>%
+  dplyr::mutate(recall = tp/(tp+fn),
+                specificity = tn/(tn+fp),
+                sensitivity = tp/(tp+fn),
+                precision = tp/(tp+fp),
+                f1 = 2*(precision*recall)/(precision+recall),
+                lrp = sensitivity/(1-specificity)) 
+```
+
+```{r rocplot t1 validation responsetype}
+rocplot_t1_vdz_validation_responsetype_ggplotobj <- horaizon_t1_vdz_predictions_validation %>% 
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = VDZ_response_type)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(y = "TPR",
+       x = "FPR") +
+  facet_wrap(~Drug, nrow = 2) +
+  scale_color_manual(values = criteria_colors) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_rocplot_t1_responsecriteria_vdz_pdf)
+print(rocplot_t1_vdz_validation_responsetype_ggplotobj)
+dev.off()
+
+rocplot_t1_ust_validation_responsetype_ggplotobj <- horaizon_t1_ust_predictions_validation %>% 
+  dplyr::mutate(Drug = "Ustekinumab") %>%
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = UST_response_type)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(y = "TPR",
+       x = "FPR") +
+  facet_wrap(~Drug, nrow = 2) +
+  scale_color_manual(values = criteria_colors) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_rocplot_t1_responsecriteria_ust_pdf)
+print(rocplot_t1_ust_validation_responsetype_ggplotobj)
+dev.off()
+```
+
+## Figure rocplot t1 validation priorantitnf
+
+```{r t1 validation priorantitnf statistics}
+horaizon_t1_vdz_predictions_validation_priorantitnf_confusion <- horaizon_t1_vdz_predictions_validation %>%
+  dplyr::mutate(type = case_when(
+    Predicted_class == "R" & Response == "R" ~ "tp",
+    Predicted_class == "NR" & Response == "NR" ~ "tn",
+    Predicted_class == "R" & Response == "NR" ~ "fp",
+    Predicted_class == "NR" & Response == "R" ~ "fn")) %>%
+  dplyr::group_by(Prior_aTNF_exposure) %>%
+  dplyr::count(type) %>%
+  tidyr::pivot_wider(names_from = type, values_from = n) %>%
+  dplyr::mutate(recall = tp/(tp+fn),
+                specificity = tn/(tn+fp),
+                sensitivity = tp/(tp+fn),
+                precision = tp/(tp+fp),
+                f1 = 2*(precision*recall)/(precision+recall),
+                lrp = sensitivity/(1-specificity)) 
+
+horaizon_t1_ust_predictions_validation_priorantitnf_confusion <- horaizon_t1_ust_predictions_validation %>%
+  dplyr::mutate(type = case_when(
+    Predicted_class == "R" & Response == "R" ~ "tp",
+    Predicted_class == "NR" & Response == "NR" ~ "tn",
+    Predicted_class == "R" & Response == "NR" ~ "fp",
+    Predicted_class == "NR" & Response == "R" ~ "fn")) %>%
+  dplyr::group_by(Prior_aTNF_exposure) %>%
+  dplyr::count(type) %>%
+  tidyr::pivot_wider(names_from = type, values_from = n) %>%
+  dplyr::mutate(recall = tp/(tp+fn),
+                specificity = tn/(tn+fp),
+                sensitivity = tp/(tp+fn),
+                precision = tp/(tp+fp),
+                f1 = 2*(precision*recall)/(precision+recall),
+                lrp = sensitivity/(1-specificity)) 
+```
+
+```{r rocplot t1 validation priorantitnf}
+rocplot_t1_vdz_validation_priorantitnf_ggplotobj <- horaizon_t1_vdz_predictions_validation %>% 
+  dplyr::mutate(Drug = "Vedolizumab") %>%
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = Prior_aTNF_exposure)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(y = "TPR",
+       x = "FPR") +
+  facet_wrap(~Drug, nrow = 2) +
+  scale_color_manual(values = atnf_colors) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_rocplot_t1_priorantitnf_vdz_pdf)
+print(rocplot_t1_vdz_validation_priorantitnf_ggplotobj)
+dev.off()
+
+rocplot_t1_ust_validation_priorantitnf_ggplotobj <- horaizon_t1_ust_predictions_validation %>% 
+  dplyr::mutate(Drug = "Ustekinumab") %>%
+  ggplot(aes(d = Response_coded, m = Predicted_response, col = Prior_aTNF_exposure)) +
+  geom_abline(slope = 1, intercept = 0, col = "#808080", linetype = 2) +
+  geom_roc(n.cuts = 0) +
+  labs(y = "TPR",
+       x = "FPR") +
+  facet_wrap(~Drug, nrow = 2) +
+  scale_color_manual(values = atnf_colors) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_rocplot_t1_priorantitnf_ust_pdf)
+print(rocplot_t1_ust_validation_priorantitnf_ggplotobj)
+dev.off()
+```
+
+## sessionInfo
+
+```{r sessionInfo}
+sessionInfo()
+```
+

@@ -1,0 +1,123 @@
+---
+title: "Figure S2"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-28'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(ggrastr)
+library(ggpubr)
+library(minfi)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+dmps_ust_csv <- file.path(basepath, "output/epic/dmp/dmp_Ustekinumab.csv")
+icc_ust_csv <- file.path(basepath, "output/epic/icc/icc_Ustekinumab.csv")
+gmset_ust_rds <- file.path(basepath, "output/epic/subset/gmset_Ustekinumab.Rds")
+
+functions_figures_r <- file.path(basepath, "workflow/scripts/figures/functions_figures.R")
+```
+
+```{r outpaths}
+figpath <- file.path(basepath, "output/figures/figS2")
+dir.create(figpath)
+
+fig_boxplot_rvnrvt2vt1_ust_predictorcpgs_pdf <- file.path(figpath, "fig_boxplot_rvnrvt2vt1_ust_predictorcpgs.pdf")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+icc_ust <- read.csv(icc_ust_csv) %>%
+  dplyr::rename(CGID = X)
+
+gmset_ust <- readRDS(gmset_ust_rds)
+
+dmps_ust <- read.csv(dmps_ust_csv)
+
+source(functions_figures_r)
+```
+
+```{r colors}
+response_cols <- c("R" = "#61FF69",
+                   "NR" = "#FF6961")
+cohort_colors <- c("Discovery" = "#D55E00",
+                   "Validation" = "#0072B2")
+criteria_colors <- c("Partial" = "#CC79A7",
+                     "Full" = "#56B4E9")
+atnf_colors <- c("Exposed" = "#999999",
+                 "Non-exposed" = "#F0E442")
+timepoint_colors <- c("T1" = "#D3D3D3",
+                      "T2" = "#000000")
+timepoint_sig_colors <- c("NS" = "#000000",
+                          "T1" = "#FF0000",
+                          "T2" = "#0000FF",
+                          "T1&T2" = "#800080")
+model_colors <- c("Uncorrected" = "#D3D3D3",
+                  "Corrected" = "#000000")
+```
+
+```{r preparation}
+horaizon_predictor_probes_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab")
+
+beta_ust <- getBeta(gmset_ust)
+anno_ust <- getAnnotation(gmset_ust)
+```
+
+```{r testing}
+#Testing
+# cpg_summaryplot(cgid = "cg05303293",
+#                 anno = anno_ust,
+#                 betas = beta_ust,
+#                 response = pData(gmset_ust)$UST_response,
+#                 timepoint = pData(gmset_ust)$UST_timepoint,
+#                 donor = pData(gmset_ust)$DonorID,
+#                 dmp_results = dmps_ust,
+#                 icc_results = icc_ust,
+#                 response_cols)
+```
+
+## Figure boxplot predictor CpGs RvNRvT2vT1
+
+```{r fig boxplot rvnrvt2vt1 ust predictorcpgs pdf}
+boxplot_rvnrvt2vt1_ust_predictorcpgs_ggplotobj_list <- lapply(horaizon_predictor_probes_ust$CpG, function(CGID){
+  cpg_summaryplot(cgid = CGID, 
+                  anno = anno_ust, 
+                  betas = beta_ust, 
+                  icc_results = icc_ust,
+                  response = pData(gmset_ust)$UST_response, 
+                  timepoint = pData(gmset_ust)$UST_timepoint, 
+                  donor = pData(gmset_ust)$DonorID,
+                  response_cols = response_cols,
+                  dmp_results = dmps_ust)
+})
+
+boxplot_rvnrvt2vt1_ust_predictorcpgs_ggplotobj <- ggarrange(plotlist = boxplot_rvnrvt2vt1_ust_predictorcpgs_ggplotobj_list, 
+                                                            ncol = 5, 
+                                                            nrow = 14, 
+                                                            legend = "bottom", 
+                                                            common.legend = T)
+
+boxplot_rvnrvt2vt1_ust_predictorcpgs_ggplotobj <- annotate_figure(boxplot_rvnrvt2vt1_ust_predictorcpgs_ggplotobj, 
+                                                                  left = "% methylation")
+
+pdf(width = 20, height = 72, file = fig_boxplot_rvnrvt2vt1_ust_predictorcpgs_pdf)
+print(boxplot_rvnrvt2vt1_ust_predictorcpgs_ggplotobj)
+dev.off()
+```
+
+## sessionInfo
+
+```{r sessioninfo}
+sessionInfo()
+```

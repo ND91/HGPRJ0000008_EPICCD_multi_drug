@@ -6,6 +6,9 @@ if (length(args) != 3) {
   stop(paste0("Script needs 3 arguments. Current input is:", args))
 }
 
+# Reinstall preprocessCore as otherwise preprocessFunnorm will not work.
+BiocManager::install("preprocessCore", configure.args="--disable-threading", force = T)
+
 library(minfi)
 library(dplyr)
 

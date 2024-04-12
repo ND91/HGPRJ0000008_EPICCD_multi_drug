@@ -6,7 +6,7 @@ if (length(args) != 3) {
   stop(paste0("Script needs 3 arguments. Current input is:", args))
 }
 
-suppressPackageStartupMessages(library(dplyr))
+library(dplyr)
 
 dmps_csv_path <- args[1]
 epic_annotation_csv <- args[2]

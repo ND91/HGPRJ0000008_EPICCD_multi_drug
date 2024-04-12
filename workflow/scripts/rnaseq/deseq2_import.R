@@ -8,19 +8,19 @@ if (length(args) != 5) {
 
 require(dplyr)
 require(readxl)
-require(DEseq2)
+require(DESeq2)
 require(org.Hs.eg.db)
 require(AnnotationDbi)
 
-sample_metadata_path <- args[1] #"config/samples/sample_metadata.xlsx"
-rnaseq_files_path <- args[2] #"config/samples/rnaseq_files.xlsx"
-rnaseq_counts_path <- args[3] #"output/rnaseq/counts/counts.txt"
-dds_path <- args[4] #"output/rnaseq/deseq2/dds.Rds"
-rlog_path <- args[5] #"output/rnaseq/deseq2/rld.Rds"
+sample_metadata_xlsx <- args[1] #"config/samples/sample_metadata.xlsx"
+rnaseq_files_xlsx <- args[2] #"config/samples/rnaseq_files.xlsx"
+rnaseq_counts_txt <- args[3] #"output/rnaseq/counts/counts.txt"
+dds_rds <- args[4] #"output/rnaseq/deseq2/dds.Rds"
+rlog_rds <- args[5] #"output/rnaseq/deseq2/rld.Rds"
 
 # Import the sample metadata
-sample_metadata <- readxl::read_excel(sample_metadata_path)
-rnaseq_files <- readxl::read_excel(rnaseq_files_path)
+sample_metadata <- readxl::read_excel(sample_metadata_xlsx)
+rnaseq_files <- readxl::read_excel(rnaseq_files_xlsx)
 
 rnaseq_sample_metadata <- rnaseq_files %>%
   dplyr::left_join(sample_metadata, by = "SampleID") %>%
@@ -29,10 +29,10 @@ rnaseq_sample_metadata <- rnaseq_files %>%
 rownames(rnaseq_sample_metadata) <- rnaseq_sample_metadata$SampleID
 
 # Clean counts
-rnaseq_counts_raw <- read.csv(rnaseq_counts_path, sep = "\t", skip = 1)
+rnaseq_counts_raw <- read.csv(rnaseq_counts_txt, sep = "\t", skip = 1)
 rnaseq_counts <- rnaseq_counts_raw[,-c(1:6)]
 rownames(rnaseq_counts) <- rnaseq_counts_raw$Geneid
-colnames(rnaseq_counts) <- gsub("^.+(F[0-9]+)(T[0-9]).+$", "\\1_\\2", colnames(rnaseq_counts))
+colnames(rnaseq_counts) <- gsub("^.+(F[0-9]+)_([0-9]+)_filtered.bam$", "\\1_\\2", colnames(rnaseq_counts))
 rnaseq_counts <- rnaseq_counts[which(rowSums(rnaseq_counts) != 0),]
 
 # Prepare feature metadata
@@ -51,10 +51,10 @@ dds <- DESeq2::DESeqDataSetFromMatrix(countData = rnaseq_counts,
 
 mcols(dds) <- cbind(mcols(dds), rnaseq_feature_metadata)
 
-saveRDS(object = dds, file = dds_path, compress = "gzip")
+saveRDS(object = dds, file = dds_rds, compress = "gzip")
 
 rld <- DESeq2::rlog(dds)
 
-saveRDS(object = rld, file = rlog_path, compress = "gzip")
+saveRDS(object = rld, file = rlog_rds, compress = "gzip")
 
 sessionInfo()

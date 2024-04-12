@@ -1,0 +1,181 @@
+---
+title: "Figure S2"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-28'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(ggrastr)
+library(ggpubr)
+library(minfi)
+```
+
+```{r paths}
+horaizon_predictor_probes_xlsx <- "config/horaizon/predictor_cpgs.xlsx"
+
+dmps_t1crp_vdz_csv <- "output/epic/dmp/dmp_T1CRP_Vedolizumab.csv"
+dmps_t1crp_ust_csv <- "output/epic/dmp/dmp_T1CRP_Ustekinumab.csv"
+dmps_t1fcp_vdz_csv <- "output/epic/dmp/dmp_T1FCP_Vedolizumab.csv"
+dmps_t1fcp_ust_csv <- "output/epic/dmp/dmp_T1FCP_Ustekinumab.csv"
+
+icc_vdz_csv <- "output/epic/icc/icc_Vedolizumab.csv"
+icc_ust_csv <- "output/epic/icc/icc_Ustekinumab.csv"
+
+gmset_vdz_rds <- "output/epic/subset/gmset_Vedolizumab.Rds"
+gmset_ust_rds <- "output/epic/subset/gmset_Ustekinumab.Rds"
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+icc_vdz <- read.csv(icc_vdz_csv) %>%
+  dplyr::rename(CGID = X)
+icc_ust <- read.csv(icc_ust_csv) %>%
+  dplyr::rename(CGID = X)
+
+dmps_t1crp_vdz <- read.csv(dmps_t1crp_vdz_csv)
+dmps_t1crp_ust <- read.csv(dmps_t1crp_ust_csv)
+dmps_t1fcp_vdz <- read.csv(dmps_t1fcp_vdz_csv)
+dmps_t1fcp_ust <- read.csv(dmps_t1fcp_ust_csv)
+```
+
+```{r predictors}
+horaizon_predictor_probes_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab")
+
+horaizon_predictor_probes_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab")
+```
+
+```{r preparation}
+beta_vdz <- getBeta(gmset_vdz)
+anno_vdz <- getAnnotation(gmset_vdz)
+
+beta_ust <- getBeta(gmset_ust)
+anno_ust <- getAnnotation(gmset_ust)
+```
+
+```{r functions}
+cpg_summaryplot(cgid = "cg05303293",
+                anno = anno_vdz,
+                betas = beta_vdz,
+                response = pData(gmset_vdz)$VDZ_response,
+                timepoint = pData(gmset_vdz)$VDZ_timepoint,
+                donor = pData(gmset_vdz)$DonorID,
+                dmp_results = dmps_vdz,
+                icc_results = icc_vdz)
+
+cpg_summaryplot <- function(cgid, anno, betas, response, timepoint, donor, dmp_results, icc_results, enlarged = F){
+  
+  dmp_subset <- rbind(data.frame(dmp_results[match(cgid, dmp_results$CGID), c("CGID", "Betadiff_T1RvNR", "P.Value_T1RvNR", "adj.P.Val_T1RvNR")], Timepoint = "T1") %>%
+                        dplyr::rename(Betadiff = Betadiff_T1RvNR,
+                                      P.Value = P.Value_T1RvNR,
+                                      adj.P.Val = adj.P.Val_T1RvNR),
+                      data.frame(dmp_results[match(cgid, dmp_results$CGID), c("CGID", "Betadiff_T2RvNR", "P.Value_T2RvNR", "adj.P.Val_T2RvNR")], Timepoint = "T2") %>%
+                        dplyr::rename(Betadiff = Betadiff_T2RvNR,
+                                      P.Value = P.Value_T2RvNR,
+                                      adj.P.Val = adj.P.Val_T2RvNR))
+  
+  beta_df <- data.frame(Beta = betas[cgid,], 
+                        Response = response, 
+                        Timepoint = timepoint, 
+                        Donor = donor) %>%
+    dplyr::left_join(dmp_subset, by = "Timepoint") %>%
+    dplyr::left_join(icc_results, by = "CGID") %>%
+    dplyr::mutate(label = paste0(Timepoint, "\np-value = ", round(P.Value, 3), 
+                                 "\nICC = ", round(icc, 2), " [", round(icc_lbound, 2), "; ", round(icc_rbound, 2), "]"))
+  
+  #Annotation
+  hgnc <- paste(unique(strsplit(anno[cgid, "UCSC_RefGene_Name"], ";")[[1]]), collapse = ";")
+  coords <- paste0(anno[cgid, "chr"], ":", anno[cgid, "pos"])
+  
+  if(hgnc != ""){
+    stitle <- paste0(coords, " (", hgnc, ")")
+  } else{
+    stitle <- paste0(coords)
+  }
+  
+  #Visualization
+  tplot <- ggplot(beta_df, aes(x = Timepoint, y = Beta)) +
+    geom_point(aes(group = Donor, shape = Response, col = Response), show.legend = F, position = position_dodge(0.1)) +
+    geom_line(aes(group = Donor, alpha = 0.25), linetype = "dotted", show.legend = F, position = position_dodge(0.1)) +
+    xlab("Timepoint") +
+    ylab("% Methylation") +
+    labs(title = cgid,
+         subtitle = stitle) +
+    scale_color_manual(values = c("R" = "#61ff69",
+                                  "NR" = "#ff6961")) +
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          text = element_text(size = 12))
+  
+  if(enlarged == F) tplot <- tplot + coord_cartesian(ylim = c(0, 1))
+  
+  bplot <- ggplot(beta_df, aes(x = Response, y = Beta)) +
+    geom_boxplot(col = "black") +
+    geom_point(aes(col = Response), size = 2) +
+    facet_wrap(~label, nrow = 1) +
+    labs(x = "Response",
+         y = "% Methylation") +
+    scale_color_manual(values = c("R" = "#61ff69",
+                                  "NR" = "#ff6961")) +
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          text = element_text(size = 12))
+  
+  if(enlarged == F) bplot <- bplot + coord_cartesian(ylim = c(0, 1))
+  
+  gplot <- ggarrange(tplot, bplot, nrow = 2, ncol = 1, align = "hv")
+  
+  return(gplot)
+}
+```
+
+```{r figS2}
+boxplots_predictor_vdz_cpgs <- lapply(predictor_cpgs_vdz$CpG, function(CGID){
+  cpg_summaryplot(cgid = CGID, 
+                  anno = anno_vdz, 
+                  betas = beta_vdz, 
+                  icc_results = icc_vdz,
+                  response = pData(gmset_vdz)$VDZ_response, 
+                  timepoint = pData(gmset_vdz)$VDZ_timepoint, 
+                  donor = pData(gmset_vdz)$DonorID,
+                  dmp_results = dmps_vdz)
+})
+
+figS2 <- ggarrange(plotlist = boxplots_predictor_vdz_cpgs, ncol = 5, nrow = 5)
+
+pdf(width = 20, height = 30, file = "docs/figures/figS2/figS2.pdf")
+print(figS2)
+dev.off()
+```
+
+```{r figS4}
+boxplots_predictor_ust_cpgs <- lapply(predictor_cpgs_ust$CpG, function(CGID){
+  cpg_summaryplot(cgid = CGID, 
+                  anno = anno_ust, 
+                  betas = beta_ust, 
+                  icc_results = icc_ust,
+                  response = pData(gmset_ust)$UST_response, 
+                  timepoint = pData(gmset_ust)$UST_timepoint, 
+                  donor = pData(gmset_ust)$DonorID,
+                  dmp_results = dmps_ust)
+})
+
+figS3 <- ggarrange(plotlist = boxplots_predictor_ust_cpgs, ncol = 5, nrow = 14)
+
+pdf(width = 20, height = 72, file = "docs/figures/figS3/figS3.pdf")
+print(figS3)
+dev.off()
+```

@@ -23,10 +23,8 @@ y_path <- args[4]
 rgset <- readRDS(rgset_path)
 
 prefix <- case_when(
-  treatment == "Adalimumab" ~ "ADA_",
   treatment == "Vedolizumab" ~ "VDZ_",
   treatment == "Ustekinumab" ~ "UST_",
-  treatment == "Infliximab" ~ "IFX_",
 )
 
 cohort_column <- paste0(prefix, "cohort")
@@ -36,7 +34,9 @@ response_column <- paste0(prefix, "response")
 t1_discval_samples <- pData(rgset) %>%
   data.frame() %>%
   dplyr::filter(!!sym(timepoint_column) %in% c("T1"),
-                !!sym(cohort_column) %in% c("EPIC-CD Discovery", "EPIC-CD Validation")) %>%
+                !!sym(cohort_column) %in% c("EPIC-CD Discovery", "EPIC-CD Validation"),
+                !is.na(!!sym(response_column)),
+                Disease == "CD") %>%
   tibble::rownames_to_column(var = "arrayname") %>%
   dplyr::pull(arrayname)
 
@@ -106,3 +106,5 @@ sample_metadata <- pData(gmset) %>%
 # Save data
 data.table::fwrite(data.frame(betas_combat_csp_t), X_path, row.names = T)
 write.csv(sample_metadata, y_path)
+
+sessionInfo()

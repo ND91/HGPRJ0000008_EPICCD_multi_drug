@@ -1,0 +1,11 @@
+name: snakemake
+channels:
+  - conda-forge
+  - bioconda
+  - anaconda
+dependencies:
+  - snakemake=7.14.1
+  - python=3.10.6
+  - pandas=1.5.0
+  - openpyxl=3.0.10
+  - graphviz=6.0.1

@@ -1,50 +1,71 @@
-# BENIMID 2022
-
-rule r_volcanoplot_RT2vT1:
+rule fig_rebuttal_R3P6:
   input:
-    dmps_anno_Ada="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/epic/dmp/dmp_Adalimumab_annotated.csv",
-    dmps_anno_Ifx="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/epic/dmp/dmp_Infliximab_annotated.csv",
-    dmps_anno_Vdz="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/epic/dmp/dmp_Vedolizumab_annotated.csv",
-    dmps_anno_Ust="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/epic/dmp/dmp_Ustekinumab_annotated.csv",
+    rgset_qc="{basedir}/output/epic/qc/rgset_qc.Rds",
+    validation_predictions_csv="{basedir}/output/epic/metadata/priorantitnf_summary_glmmodel_predictions_validation.csv",
   output:
-    fig_volcanoplot_png="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/figures/volcanoplot_RT2vT1.png",
-    fig_pairplot_png="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/figures/pairplot_RT2vT1.png",
+    fig_effectsizeplot_pdf="{basedir}/output/figures/effectsizeplot_{treatment}_T1RvNR_T2RvNR.pdf",
+    fig_effectsizeplot_png="{basedir}/output/figures/effectsizeplot_{treatment}_T1RvNR_T2RvNR.png",
   conda:
-    "../envs/r.yaml"
+    "../envs/r-plot.yaml"
   log:
-    "/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/figures/r_volcanoplot_RT2vT1.log",
+    "{basedir}/output/figures/effectsizeplot_{treatment}_T1RvNR_T2RvNR.log",
   benchmark:
-    "/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/figures/r_volcanoplot_RT2vT1_benchmark.txt",
+    "{basedir}/output/figures/effectsizeplot_{treatment}_T1RvNR_T2RvNR_benchmark.txt",
   resources:
     mem_mb=20000,
   message:
-    "--- Volcanoplot RT2vT1 ---"
+    "--- Effectsize plot T1RvNR vs T2RvNR ---",
+  params:
+    treatment="{treatment}",
   shell:
     """
-    Rscript --vanilla workflow/scripts/figures/fig_volcanoplot_RT2vT1.r {input.dmps_anno_Ada} {input.dmps_anno_Ifx} {input.dmps_anno_Vdz} {input.dmps_anno_Ust} {output.fig_volcanoplot_png} {output.fig_pairplot_png} &> {log}
-    """  
+    Rscript --vanilla workflow/scripts/figures/effectsizeplot_T1RvNR_T2RvNR.r "{input.dmps_anno}" "{input.horaizon_predictors_xlsx}" "{params.treatment}" "{output.fig_effectsizeplot_pdf}" "{output.fig_effectsizeplot_png}" &> "{log}"
+    """
 
-rule r_volcanoplot_T1RvNR:
+rule effectsizeplot_T1RvNR_T2RvNR:
   input:
-    dmps_anno_Ada="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/epic/dmp/dmp_Adalimumab_annotated.csv",
-    dmps_anno_Ifx="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/epic/dmp/dmp_Infliximab_annotated.csv",
-    dmps_anno_Vdz="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/epic/dmp/dmp_Vedolizumab_annotated.csv",
-    dmps_anno_Ust="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/epic/dmp/dmp_Ustekinumab_annotated.csv",
-    predictor_cpgs_path="config/horaizon/predictor_cpgs.xlsx"
+    dmps_anno="{basedir}/output/epic/dmp/dmp_{treatment}_annotated.csv",
+    horaizon_predictors_xlsx=config['horaizon_markers'],
   output:
-    fig_volcanoplot_png="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/figures/volcanoplot_RT2vT1.png",
-    fig_pairplot_png="/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/figures/pairplot_RT2vT1.png",
+    fig_effectsizeplot_pdf="{basedir}/output/figures/effectsizeplot_{treatment}_T1RvNR_T2RvNR.pdf",
+    fig_effectsizeplot_png="{basedir}/output/figures/effectsizeplot_{treatment}_T1RvNR_T2RvNR.png",
   conda:
-    "../envs/r.yaml"
+    "../envs/r-plot.yaml"
   log:
-    "/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/figures/r_volcanoplot_RT2vT1.log",
+    "{basedir}/output/figures/effectsizeplot_{treatment}_T1RvNR_T2RvNR.log",
   benchmark:
-    "/home/andrewliyim/lkgres/projects/PRJ0000008_EPICCD/multi_drug/output/figures/r_volcanoplot_RT2vT1_benchmark.txt",
+    "{basedir}/output/figures/effectsizeplot_{treatment}_T1RvNR_T2RvNR_benchmark.txt",
   resources:
     mem_mb=20000,
   message:
-    "--- Volcanoplot RT2vT1 ---"
+    "--- Effectsize plot T1RvNR vs T2RvNR ---",
+  params:
+    treatment="{treatment}",
   shell:
     """
-    Rscript --vanilla workflow/scripts/figures/fig_volcanoplot_RT2vT1.r {input.dmps_anno_Ada} {input.dmps_anno_Ifx} {input.dmps_anno_Vdz} {input.dmps_anno_Ust} {input.predictor_cpgs_path} {output.fig_volcanoplot_png} {output.fig_pairplot_png} &> {log}
-    """  
+    Rscript --vanilla workflow/scripts/figures/effectsizeplot_T1RvNR_T2RvNR.r "{input.dmps_anno}" "{input.horaizon_predictors_xlsx}" "{params.treatment}" "{output.fig_effectsizeplot_pdf}" "{output.fig_effectsizeplot_png}" &> "{log}"
+    """
+
+rule r_volcanoplot_T2vT1:
+  input:
+    dmps_anno="{basedir}/output/epic/dmp/dmp_{treatment}_annotated.csv",
+  output:
+    fig_volcanoplot_RT2vT1_pdf="{basedir}/output/figures/volcanoplot_{treatment}_RT2vT1.pdf",
+    fig_volcanoplot_NRT2vT1_pdf="{basedir}/output/figures/volcanoplot_{treatment}_NRT2vT1.pdf",
+    fig_effectsizeplot_RT2vT1_NRT2vT1_pdf="{basedir}/output/figures/effectsizeplot_{treatment}_RT2vT1_NRT2vT1.pdf",
+  conda:
+    "../envs/r-plot.yaml"
+  log:
+    "{basedir}/output/figures/r_volcanoplot_{treatment}_T2vT1.log",
+  benchmark:
+    "{basedir}/output/figures/r_volcanoplot_{treatment}_T2vT1_benchmark.txt",
+  resources:
+    mem_mb=20000,
+  message:
+    "--- Volcanoplot T2vT1 ---",
+  params:
+    treatment="{treatment}",
+  shell:
+    """
+    Rscript --vanilla workflow/scripts/figures/fig_volcanoplot_T2vT1.r "{input.dmps_anno}" "{input.horaizon_predictors_xlsx}" "{params.treatment}" "{output.fig_volcanoplot_RT2vT1_pdf}" "{output.fig_volcanoplot_NRT2vT1_pdf}" "{output.fig_effectsizeplot_RT2vT1_NRT2vT1_pdf}" &> "{log}"
+    """

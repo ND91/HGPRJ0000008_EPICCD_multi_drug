@@ -1,0 +1,168 @@
+---
+title: "Figure S4"
+author: "Andrew Y.F. Li Yim"
+date: '2023-08-28'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(ggrastr)
+library(ggpubr)
+library(ggrepel)
+library(minfi)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+dmps_t1crp_vdz_csv <- file.path(basepath,"output/epic/dmp/dmp_T1CRP_Vedolizumab.csv")
+dmps_t1crp_ust_csv <- file.path(basepath,"output/epic/dmp/dmp_T1CRP_Ustekinumab.csv")
+dmps_t1fcp_vdz_csv <- file.path(basepath,"output/epic/dmp/dmp_T1FCP_Vedolizumab.csv")
+dmps_t1fcp_ust_csv <- file.path(basepath,"output/epic/dmp/dmp_T1FCP_Ustekinumab.csv")
+
+gmset_vdz_rds <- file.path(basepath,"output/epic/subset/gmset_Vedolizumab.Rds")
+gmset_ust_rds <- file.path(basepath,"output/epic/subset/gmset_Ustekinumab.Rds")
+```
+
+```{r outpaths}
+figpath <- file.path(basepath, "output/figures/figS4")
+dir.create(figpath)
+
+fig_volcanoplot_t1_crp_vdz_pdf <- file.path(figpath, "fig_volcanoplot_t1_crp_vdz.pdf")
+fig_volcanoplot_t1_crp_ust_pdf <- file.path(figpath, "fig_volcanoplot_t1_crp_ust.pdf")
+fig_volcanoplot_t1_fcp_vdz_pdf <- file.path(figpath, "fig_volcanoplot_t1_fcp_vdz.pdf")
+fig_volcanoplot_t1_fcp_ust_pdf <- file.path(figpath, "fig_volcanoplot_t1_fcp_ust.pdf")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+dmps_t1crp_vdz <- read.csv(dmps_t1crp_vdz_csv)
+dmps_t1crp_ust <- read.csv(dmps_t1crp_ust_csv)
+dmps_t1fcp_vdz <- read.csv(dmps_t1fcp_vdz_csv)
+dmps_t1fcp_ust <- read.csv(dmps_t1fcp_ust_csv)
+```
+
+```{r predictors}
+horaizon_predictor_probes_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab")
+
+horaizon_predictor_probes_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab")
+```
+
+## Figure volcanoplot t1 CRP
+
+```{r volcanoplot t1 crp}
+volcanoplot_t1_crp_vdz_ggplotobj <- dmps_t1crp_vdz %>%
+  dplyr::mutate(Drug = "Vedolizumab",
+                Predictor = ifelse(CGID %in% horaizon_predictor_probes_vdz$CpG, "Predictor", NA),
+                label = ifelse(CGID %in% horaizon_predictor_probes_vdz$CpG & P.Value<0.05, CGID, NA)) %>%
+  ggplot(aes(x = Betadiff_CRP*100, y = -log10(P.Value))) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(Predictor == "Predictor"), 
+                  col = "#000000") +
+  geom_label_repel(aes(label = label), max.overlaps = Inf) +
+  facet_wrap(~Drug) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_volcanoplot_t1_crp_vdz_pdf)
+print(volcanoplot_t1_crp_vdz_ggplotobj)
+dev.off()
+
+volcanoplot_t1_crp_ust_ggplotobj <- dmps_t1crp_ust %>%
+  dplyr::mutate(Drug = "Ustekinumab",
+                Predictor = ifelse(CGID %in% horaizon_predictor_probes_ust$CpG, "Predictor", NA),
+                label = ifelse(CGID %in% horaizon_predictor_probes_ust$CpG & P.Value<0.05, CGID, NA)) %>%
+  ggplot(aes(x = Betadiff_CRP*100, y = -log10(P.Value))) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(Predictor == "Predictor"), 
+                  col = "#000000") +
+  geom_label_repel(aes(label = label), max.overlaps = Inf) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  facet_wrap(~Drug) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_volcanoplot_t1_crp_ust_pdf)
+print(volcanoplot_t1_crp_ust_ggplotobj)
+dev.off()
+```
+
+## Figure volcanoplot t1 FCP
+
+```{r volcanoplot t1 fcp}
+volcanoplot_t1_fcp_vdz_ggplotobj <- dmps_t1fcp_vdz %>%
+  dplyr::mutate(Drug = "Vedolizumab",
+                Predictor = ifelse(CGID %in% horaizon_predictor_probes_vdz$CpG, "Predictor", NA),
+                label = ifelse(CGID %in% horaizon_predictor_probes_vdz$CpG & P.Value<0.05, CGID, NA)) %>%
+  ggplot(aes(x = Betadiff_FCP*100, y = -log10(P.Value))) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(Predictor == "Predictor"), 
+                  col = "#000000") +
+  geom_label_repel(aes(label = label), max.overlaps = Inf) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  facet_wrap(~Drug) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_volcanoplot_t1_fcp_vdz_pdf)
+print(volcanoplot_t1_fcp_vdz_ggplotobj)
+dev.off()
+
+volcanoplot_t1_fcp_ust_ggplotobj <- dmps_t1fcp_ust %>%
+  dplyr::mutate(Drug = "Ustekinumab",
+                Predictor = ifelse(CGID %in% horaizon_predictor_probes_ust$CpG, "Predictor", NA),
+                label = ifelse(CGID %in% horaizon_predictor_probes_ust$CpG & P.Value<0.05, CGID, NA)) %>%
+  ggplot(aes(x = Betadiff_FCP*100, y = -log10(P.Value))) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = -log10(0.05), col = "#808080", linetype = "dashed") +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(Predictor == "Predictor"), 
+                  col = "#000000") +
+  geom_label_repel(aes(label = label), max.overlaps = Inf) +
+  labs(x = "Difference % methylation",
+       y = bquote(-log[10]~"(p-value)")) +
+  facet_wrap(~Drug) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_volcanoplot_t1_fcp_ust_pdf)
+print(volcanoplot_t1_fcp_ust_ggplotobj)
+dev.off()
+```
+
+## SessionInfo()
+
+```{r sessionInfo}
+sessionInfo()
+```

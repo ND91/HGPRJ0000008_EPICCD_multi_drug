@@ -1,0 +1,512 @@
+---
+title: "Figure 4"
+author: "Andrew Y.F. Li Yim"
+date: '2023-03-20'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(minfi)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(plotROC)
+library(ggrastr)
+library(ggpubr)
+library(ggrepel)
+library(ggExtra)
+```
+
+```{r inpaths}
+basepath <-  "/mnt/smb/lkgres/ayliyim/projects/PRJ0000008_EPICCD/anti_a4b7_il1223_dnam"
+
+horaizon_predictor_probes_xlsx <- file.path(basepath, "config/horaizon/predictor_cpgs.xlsx")
+
+dmps_vdz_csv <- file.path(basepath, "output/epic/dmp/dmp_Vedolizumab_annotated.csv")
+dmps_ust_csv <- file.path(basepath, "output/epic/dmp/dmp_Ustekinumab_annotated.csv")
+
+gmset_vdz_rds <- file.path(basepath, "output/epic/subset/gmset_Vedolizumab.Rds")
+gmset_ust_rds <- file.path(basepath, "output/epic/subset/gmset_Ustekinumab.Rds")
+
+degs_vdz_csv <- file.path(basepath, "output/rnaseq/degs/degs_Vedolizumab.csv")
+degs_ust_csv <- file.path(basepath, "output/rnaseq/degs/degs_Ustekinumab.csv")
+
+rld_vdz_rds <- file.path(basepath, "output/rnaseq/r/rld_Vedolizumab.Rds")
+rld_ust_rds <- file.path(basepath, "output/rnaseq/r/rld_Ustekinumab.Rds")
+
+fgsea_vdz_csv <- file.path(basepath, "output/rnaseq/fgsea/fgsea_kegg_Vedolizumab.csv")
+fgsea_ust_csv <- file.path(basepath, "output/rnaseq/fgsea/fgsea_kegg_Ustekinumab.csv")
+```
+
+```{r outpaths}
+figpath <- file.path(basepath, "output/figures/fig4")
+dir.create(figpath)
+
+fig_scatterplot_t1rvnr_t2rvnr_deg_vdz_pdf <- file.path(figpath, "fig_scatterplot_degs_t1rvnr_t2rvnr_vdz.pdf")
+fig_scatterplot_t1rvnr_t2rvnr_deg_ust_pdf <- file.path(figpath, "fig_scatterplot_degs_t1rvnr_t2rvnr_ust.pdf")
+
+fig_boxplot_tulp4_t1rvnr_deg_vdz_pdf <- file.path(figpath, "fig_boxplot_tulp4_t1rvnr_deg_vdz.pdf")
+fig_boxplot_rfpl2_t1rvnr_deg_vdz_pdf <- file.path(figpath, "fig_boxplot_rfpl2_t1rvnr_deg_vdz.pdf")
+fig_boxplot_mrc1_t1rvnr_deg_ust_pdf <- file.path(figpath, "fig_boxplot_mrc1_t1rvnr_deg_ust.pdf")
+fig_boxplot_tmem191b_t1rvnr_deg_ust_pdf <- file.path(figpath, "fig_boxplot_tmem191b_t1rvnr_deg_ust.pdf")
+
+fig_scatterplot_rfpl2_vdz_t1rvnr_me_pdf <- file.path(figpath, "fig_scatterplot_rfpl2_vdz_t1rvnr_me.pdf")
+fig_scatterplot_tmem191b_ust_t1rvnr_me_pdf <- file.path(figpath, "fig_scatterplot_tmem191b_ust_t1rvnr_me.pdf")
+
+fig_boxplot_mcm2_t2rvnr_deg_vdz_pdf <- file.path(figpath, "fig_boxplot_mcm2_t2rvnr_deg_vdz.pdf")
+fig_boxplot_rfpl2_t2rvnr_deg_vdz_pdf <- file.path(figpath, "fig_boxplot_rfpl2_t2rvnr_deg_vdz.pdf")
+fig_boxplot_potef_t2rvnr_deg_ust_pdf <- file.path(figpath, "fig_boxplot_potef_t2rvnr_deg_ust.pdf")
+fig_boxplot_hdac4_t2rvnr_deg_ust_pdf <- file.path(figpath, "fig_boxplot_hdac4_t2rvnr_deg_ust.pdf")
+fig_boxplot_parp4_t1rvnr_deg_ust_pdf <- file.path(figpath, "fig_boxplot_parp4_t1rvnr_deg_ust.pdf")
+fig_boxplot_mark3_t1rvnr_deg_ust_pdf <- file.path(figpath, "fig_boxplot_mark3_t1rvnr_deg_ust.pdf")
+
+fig_scatterplot_rfpl2_vdz_t2rvnr_me_pdf <- file.path(figpath, "fig_scatterplot_rfpl2_vdz_t2rvnr_me.pdf")
+```
+
+```{r import}
+horaizon_predictor_probes <- readxl::read_excel(horaizon_predictor_probes_xlsx)
+
+dmps_vdz <- read.csv(dmps_vdz_csv)
+dmps_ust <- read.csv(dmps_ust_csv)
+
+gmset_vdz <- readRDS(gmset_vdz_rds)
+gmset_ust <- readRDS(gmset_ust_rds)
+
+degs_vdz <- read.csv(degs_vdz_csv)
+degs_ust <- read.csv(degs_ust_csv)
+
+rld_vdz <- readRDS(rld_vdz_rds)
+rld_ust <- readRDS(rld_ust_rds)
+
+fgsea_vdz <- read.csv(fgsea_vdz_csv)
+fgsea_ust <- read.csv(fgsea_ust_csv)
+```
+
+```{r colors}
+response_cols <- c("R" = "#61FF69",
+                   "NR" = "#FF6961")
+cohort_colors <- c("Discovery" = "#D55E00",
+                   "Validation" = "#0072B2")
+criteria_colors <- c("Partial" = "#CC79A7",
+                     "Full" = "#56B4E9")
+atnf_colors <- c("Exposed" = "#999999",
+                 "Non-exposed" = "#F0E442")
+timepoint_colors <- c("T1" = "#D3D3D3",
+                      "T2" = "#000000")
+timepoint_sig_colors <- c("NS" = "#000000",
+                          "T1" = "#FF0000",
+                          "T2" = "#0000FF",
+                          "T1&T2" = "#800080")
+model_colors <- c("Uncorrected" = "#D3D3D3",
+                  "Corrected" = "#000000")
+```
+
+```{r functions}
+deg_boxplot <- function(ensgv, rld, deg_results){
+  deg_subset <- deg_results %>%
+    dplyr::filter(ENSGv == ensgv)
+  
+  counts_df <- data.frame(Expr = assay(rld)[ensgv,], 
+                          Response = colData(rld)$Response) %>%
+    dplyr::mutate(label = paste0(deg_subset$HGNC, "\np-value = ", ifelse(deg_subset$pvalue>0.01, round(deg_subset$pvalue, 4), formatC(deg_subset$pvalue, format = "e", digits = 3))))
+  
+  ggplotobj <- ggplot(counts_df, aes(y = Expr, x = Response, fill = Response)) +
+    geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+    geom_jitter(size = 3, shape = 21) +
+    labs(title = deg_subset$HGNC,
+         subtitle = paste0("p-value = ", ifelse(deg_subset$pvalue>0.01, round(deg_subset$pvalue, 4), formatC(deg_subset$pvalue, format = "e", digits = 3))),
+         x = "Response",
+         y = bquote(log[2]~"(expression)")) +
+    scale_fill_manual(values = response_cols) +
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          plot.title = element_text(face = "bold"),
+          axis.title.x = element_blank(),
+          strip.text = element_text(face="bold"),
+          legend.position = "bottom",
+          text = element_text(size = 12))
+  
+  return(ggplotobj)
+}
+
+dmp_boxplot <- function(cgid, gmset, dmp_results){
+  dmp_subset <- dmp_results %>%
+    dplyr::filter(CGID == cgid) %>%
+    dplyr::select(P.Value) %>%
+    dplyr::mutate(CGID = cgid) %>%
+    dplyr::rename(pvalue = P.Value)
+  
+  betas_df <- data.frame(Methylation = getBeta(gmset)[cgid,], 
+                         Response = pData(gmset)$Response) %>%
+    dplyr::mutate(label = paste0(dmp_subset$CGID, "\np-value = ", ifelse(dmp_subset$pvalue>0.01, round(dmp_subset$pvalue, 4), formatC(dmp_subset$pvalue, format = "e", digits = 3))))
+  
+  ggplotobj <- ggplot(betas_df, aes(x = Response, y = Methylation, fill = Response)) +
+    geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+    geom_jitter(size = 3, shape = 21) +
+    facet_wrap(~label, nrow = 1, strip.position="left") +
+    labs(x = "Response",
+         y = "%Methylation") +
+    scale_fill_manual(values = response_cols) +
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          axis.title.y = element_blank(),
+          strip.text = element_text(face="bold"),
+          legend.position = "bottom",
+          text = element_text(size = 12))
+  
+  return(ggplotobj)
+}
+
+dme_scatterplot <- function(ensgv, cgid, gmset, rld){
+  ol_samples <- intersect(pData(gmset)$SampleID, colData(rld)$SampleID)
+  
+  gmset_ol <- gmset[,pData(gmset)$SampleID %in% ol_samples]
+  colnames(gmset_ol) <- pData(gmset_ol)$SampleID
+  gmset_ol <- gmset_ol[,ol_samples]
+  
+  rld_ol <- rld[,colData(rld)$SampleID %in% ol_samples]
+  rld_ol <- rld_ol[,ol_samples]
+    
+  methexpr <- data.frame(Beta = getBeta(gmset_ol)[cgid,],
+                         Expr = assay(rld_ol)[ensgv,],
+                         SampleID = ol_samples,
+                         Response = pData(gmset_ol)$Response)
+  
+  methexpr_corstat <- cor.test(methexpr$Beta, methexpr$Expr)
+  
+  ggplotobj <- ggplot(methexpr, aes(x = Expr, y = Beta, colour = Response, fill = Response)) +
+    geom_smooth(method = lm, col = "#000000", fill = "#000000") +
+    geom_point(size = 3) +
+    scale_fill_manual(values = response_cols) +
+    scale_color_manual(values = response_cols) +
+    labs(title = paste0(ensgv, " (", cgid, ")"),
+         subtitle = paste0("Pearson r = ", round(methexpr_corstat$estimate, 2), "; p-value = ", ifelse(methexpr_corstat$p.value>0.01, round(methexpr_corstat$p.value, 4), formatC(methexpr_corstat$p.value, format = "e", digits = 3))),
+         x = bquote(log[2]~"(expression)"),
+         y = "%Methylation") +
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          text = element_text(size = 12))
+  ggplotobj <- ggMarginal(ggplotobj, type = "boxplot", groupFill = TRUE, outlier.shape = NA)
+  
+  return(ggplotobj)
+}
+```
+
+```{r predictor cpg annotate}
+predictor_cpgs_vdz <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Vedolizumab") %>%
+  dplyr::left_join(dmps_vdz, by = c("CpG" = "CGID")) %>%
+  dplyr::mutate(Gene = gsub(";NA", "", paste0(UCSC_RefGene_Name, ";", Enhancer_gene)))
+predictor_genes_vdz <- unlist(lapply(strsplit(paste0(predictor_cpgs_vdz$UCSC_RefGene_Name, ";", predictor_cpgs_vdz$Enhancer_gene), ";"), unique))
+predictor_genes_vdz <- predictor_genes_vdz[!predictor_genes_vdz %in% c("NA", "")]
+
+predictor_cpgs_ust <- horaizon_predictor_probes %>%
+  dplyr::filter(Treatment == "Ustekinumab") %>%
+  dplyr::left_join(dmps_ust, by = c("CpG" = "CGID")) %>%
+  dplyr::mutate(Gene = gsub(";NA", "", paste0(UCSC_RefGene_Name, ";", Enhancer_gene)))
+predictor_genes_ust <- unlist(lapply(strsplit(paste0(predictor_cpgs_ust$UCSC_RefGene_Name, ";", predictor_cpgs_ust$Enhancer_gene), ";"), unique))
+predictor_genes_ust <- predictor_genes_ust[!predictor_genes_ust %in% c("NA", "")]
+```
+
+## Figure scatterplot RvNRvT2vT1
+
+```{r scatterplot rvnrvt2vt1 plot}
+scatterplot_rt2vt1_nrt2vt1_vdz_ggplotobj <- degs_vdz %>%
+  dplyr::mutate(pvalue_T1RvNR = ifelse(is.na(pvalue_T1RvNR), 1, pvalue_T1RvNR),
+                pvalue_T2RvNR = ifelse(is.na(pvalue_T2RvNR), 1, pvalue_T2RvNR),
+                pvalue_RvNR = ifelse(is.na(pvalue_RvNR), 1, pvalue_RvNR),
+                pvalue_RT2vT1 = ifelse(is.na(pvalue_RT2vT1), 1, pvalue_RT2vT1),
+                pvalue_NRT2vT1 = ifelse(is.na(pvalue_NRT2vT1), 1, pvalue_NRT2vT1),
+                pvalue_RvNRvT2vT1 = ifelse(is.na(pvalue_RvNRvT2vT1), 1, pvalue_RvNRvT2vT1),
+                Group = case_when(
+                  pvalue_NRT2vT1 > 0.05 & pvalue_RT2vT1 < 0.05 ~ "R specific",
+                  pvalue_NRT2vT1 < 0.05 & pvalue_RT2vT1 > 0.05 ~ "NR specific",
+                  pvalue_NRT2vT1 < 0.05 & pvalue_RT2vT1 < 0.05 ~ "Shared",
+                  .default = "NS"),
+                Group = factor(Group, levels = c("NS", "Shared", "NR specific", "R specific"))
+  ) %>%
+  ggplot(aes(x = stat_RT2vT1, y = stat_NRT2vT1, col = Group)) +
+  xlim(-5,5) +
+  ylim(-5,5) +
+  geom_point_rast() +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(HGNC %in% predictor_genes_vdz),
+                  col = "#000000") +
+  theme_bw()
+```
+
+## Figure scatterplot deg effect size
+
+```{r degs preparation}
+degs_vdz_rvnr <- degs_vdz %>%
+  dplyr::select(ENSGv, ENSG, HGNC, log2FoldChange_T1RvNR, stat_T1RvNR, pvalue_T1RvNR, padj_T1RvNR, log2FoldChange_T2RvNR, stat_T2RvNR, pvalue_T2RvNR, padj_T2RvNR) %>%
+  dplyr::mutate(log2FoldChange_T1RvNR = ifelse(is.na(log2FoldChange_T1RvNR), 0, log2FoldChange_T1RvNR),
+                stat_T1RvNR = ifelse(is.na(stat_T1RvNR), 0, stat_T1RvNR),
+                pvalue_T1RvNR = ifelse(is.na(pvalue_T1RvNR), 1, pvalue_T1RvNR),
+                padj_T1RvNR = ifelse(is.na(padj_T1RvNR), 1, padj_T1RvNR),
+                predictor = factor(ifelse(HGNC %in% predictor_genes_vdz, "Predictor", "NS"), levels = c("Predictor", "NS")),
+                DE_significance = case_when(
+                  pvalue_T1RvNR <= 0.05 & pvalue_T2RvNR < 0.05 ~ "T1&T2",
+                  pvalue_T1RvNR <= 0.05 & pvalue_T2RvNR > 0.05 ~ "T1",
+                  pvalue_T1RvNR > 0.05 & pvalue_T2RvNR <= 0.05 ~ "T2",
+                  .default = "NS")
+  )
+
+degs_vdz_rvnr_predictors <- degs_vdz_rvnr %>%
+  dplyr::filter(predictor == "Predictor")
+
+predictor_cpg_vdz_stats_cor <- cor.test(degs_vdz_rvnr_predictors$stat_T1RvNR, degs_vdz_rvnr_predictors$stat_T2RvNR, method = "spearman")
+
+degs_ust_rvnr <- degs_ust %>%
+  dplyr::select(ENSGv, ENSG, HGNC, log2FoldChange_T1RvNR, stat_T1RvNR, pvalue_T1RvNR, padj_T1RvNR, log2FoldChange_T2RvNR, stat_T2RvNR, pvalue_T2RvNR, padj_T2RvNR) %>%
+  dplyr::mutate(log2FoldChange_T1RvNR = ifelse(is.na(log2FoldChange_T1RvNR), 0, log2FoldChange_T1RvNR),
+                stat_T1RvNR = ifelse(is.na(stat_T1RvNR), 0, stat_T1RvNR),
+                pvalue_T1RvNR = ifelse(is.na(pvalue_T1RvNR), 1, pvalue_T1RvNR),
+                padj_T1RvNR = ifelse(is.na(padj_T1RvNR), 1, padj_T1RvNR),
+                predictor = factor(ifelse(HGNC %in% predictor_genes_ust, "Predictor", "NS"), levels = c("Predictor", "NS")),
+                DE_significance = case_when(
+                  pvalue_T1RvNR <= 0.05 & pvalue_T2RvNR < 0.05 ~ "T1&T2",
+                  pvalue_T1RvNR <= 0.05 & pvalue_T2RvNR > 0.05 ~ "T1",
+                  pvalue_T1RvNR > 0.05 & pvalue_T2RvNR <= 0.05 ~ "T2",
+                  .default = "NS"))
+
+degs_ust_rvnr_predictors <- degs_ust_rvnr %>%
+  dplyr::filter(predictor == "Predictor")
+
+predictor_cpg_ust_stats_cor <- cor.test(degs_ust_rvnr_predictors$stat_T1RvNR, degs_ust_rvnr_predictors$stat_T2RvNR, method = "spearman")
+```
+
+```{r scatterplot t1rvnr t2rvnr deg plot}
+scatterplot_t1rvnr_t2rvnr_deg_vdz_ggplotobj <- degs_vdz_rvnr %>%
+  dplyr::mutate(drug = "Vedolizumab",
+                label = ifelse(DE_significance  %in% c("T1", "T2", "T1&T2") & predictor == "Predictor", HGNC, NA)) %>%
+  ggplot(aes(x = stat_T1RvNR, y = stat_T2RvNR)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(predictor == "Predictor"),
+                  aes(col = DE_significance)) +
+  geom_label_repel(aes(label = label), 
+                   max.overlaps = Inf) +
+  labs(x = "T1",
+       y = "T2") +
+  xlim(-6, 6) +
+  ylim(-6, 6) +
+  facet_wrap(~drug) +
+  theme_bw() +
+  scale_color_manual(values = timepoint_sig_colors) +
+  theme(legend.position = "bottom",
+        legend.title = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_scatterplot_t1rvnr_t2rvnr_deg_vdz_pdf)
+print(scatterplot_t1rvnr_t2rvnr_deg_vdz_ggplotobj)
+dev.off()
+
+scatterplot_t1rvnr_t2rvnr_deg_ust_ggplotobj <- degs_ust_rvnr %>%
+  dplyr::mutate(drug = "Ustekinumab",
+                label = ifelse(DE_significance  %in% c("T1", "T2", "T1&T2") & predictor == "Predictor", HGNC, NA)) %>%
+  ggplot(aes(x = stat_T1RvNR, y = stat_T2RvNR)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  geom_point_rast(col = "#d3d3d3") +
+  geom_point_rast(data = . %>%
+                    dplyr::filter(predictor == "Predictor"),
+                  aes(col = DE_significance)) +
+  geom_label_repel(aes(label = label), 
+                   max.overlaps = Inf) +
+  labs(x = "T1",
+       y = "T2") +
+  xlim(-6, 6) +
+  ylim(-6, 6) +
+  facet_wrap(~drug) +
+  theme_bw() +
+  scale_color_manual(values = timepoint_sig_colors) +
+  theme(legend.position = "bottom",
+        legend.title = element_blank())
+
+pdf(width = 4.5, height = 5, file = fig_scatterplot_t1rvnr_t2rvnr_deg_ust_pdf)
+print(scatterplot_t1rvnr_t2rvnr_deg_ust_ggplotobj)
+dev.off()
+```
+
+## Figure boxplots T1 RvNR
+
+```{r boxplot t1rvnr dmegs preparation}
+dmegs_vdz_t1 <- degs_vdz %>%
+  dplyr::filter(HGNC %in% predictor_genes_vdz) %>%
+  dplyr::filter(pvalue_T1RvNR<0.05)
+
+rld_vdz_t1 <- rld_vdz[,colData(rld_vdz)$VDZ_timepoint == "T1"]
+colData(rld_vdz_t1)$Response <- colData(rld_vdz_t1)$VDZ_response
+
+deg_vdz_t1 <- degs_vdz %>%
+  dplyr::select(ENSGv, ENSG, HGNC, baseMean_T1RvNR, log2FoldChange_T1RvNR, lfcSE_T1RvNR, stat_T1RvNR, pvalue_T1RvNR, padj_T1RvNR) %>%
+  dplyr::rename(baseMean = baseMean_T1RvNR, 
+                log2FoldChange = log2FoldChange_T1RvNR, 
+                lfcSE = lfcSE_T1RvNR, 
+                stat = stat_T1RvNR, 
+                pvalue = pvalue_T1RvNR, 
+                padj = padj_T1RvNR) %>%
+  dplyr::arrange(pvalue)
+
+dmegs_ust_t1 <- degs_ust %>%
+  dplyr::filter(HGNC %in% predictor_genes_ust) %>%
+  dplyr::filter(pvalue_T1RvNR<0.05)
+
+rld_ust_t1 <- rld_ust[,colData(rld_ust)$UST_timepoint == "T1"]
+colData(rld_ust_t1)$Response <- colData(rld_ust_t1)$UST_response
+
+deg_ust_t1 <- degs_ust %>%
+  dplyr::select(ENSGv, ENSG, HGNC, baseMean_T1RvNR, log2FoldChange_T1RvNR, lfcSE_T1RvNR, stat_T1RvNR, pvalue_T1RvNR, padj_T1RvNR) %>%
+  dplyr::rename(baseMean = baseMean_T1RvNR, 
+                log2FoldChange = log2FoldChange_T1RvNR, 
+                lfcSE = lfcSE_T1RvNR, 
+                stat = stat_T1RvNR, 
+                pvalue = pvalue_T1RvNR, 
+                padj = padj_T1RvNR) %>%
+  dplyr::arrange(pvalue)
+```
+
+```{r boxplot t1rvnr dmegs}
+boxplot_tulp4_vdz_t1_ggplotobj <- deg_boxplot(ensgv = dmegs_vdz_t1$ENSGv[1], rld = rld_vdz_t1, deg_results = deg_vdz_t1)
+boxplot_rfpl2_vdz_t1_ggplotobj <- deg_boxplot(ensgv = dmegs_vdz_t1$ENSGv[2], rld = rld_vdz_t1, deg_results = deg_vdz_t1)
+boxplot_mrc1_ust_t1_ggplotobj <- deg_boxplot(ensgv = dmegs_ust_t1$ENSGv[1], rld = rld_ust_t1, deg_results = deg_ust_t1)
+boxplot_tmem191b_ust_t1_ggplotobj <- deg_boxplot(ensgv = dmegs_ust_t1$ENSGv[2], rld = rld_ust_t1, deg_results = deg_ust_t1)
+
+pdf(width = 3, height = 4, file = fig_boxplot_tulp4_t1rvnr_deg_vdz_pdf)
+print(boxplot_tulp4_vdz_t1_ggplotobj)
+dev.off()
+pdf(width = 3, height = 4, file = fig_boxplot_rfpl2_t1rvnr_deg_vdz_pdf)
+print(boxplot_rfpl2_vdz_t1_ggplotobj)
+dev.off()
+pdf(width = 3, height = 4, file = fig_boxplot_mrc1_t1rvnr_deg_ust_pdf)
+print(boxplot_mrc1_ust_t1_ggplotobj)
+dev.off()
+pdf(width = 3, height = 4, file = fig_boxplot_tmem191b_t1rvnr_deg_ust_pdf)
+print(boxplot_tmem191b_ust_t1_ggplotobj)
+dev.off()
+```
+
+## Figure scatterplots T1 RvNR
+
+```{r scatterplots t1rvnr dmegs}
+gmset_vdz_t1 <- gmset_vdz[,pData(gmset_vdz)$VDZ_timepoint == "T1"]
+pData(gmset_vdz_t1)$Response <- pData(gmset_vdz_t1)$VDZ_response
+
+gmset_ust_t1 <- gmset_ust[,pData(gmset_ust)$UST_timepoint == "T1"]
+pData(gmset_ust_t1)$Response <- pData(gmset_ust_t1)$UST_response
+
+scatterplot_rfpl2_vdz_t1rvnr_me_ggplotobj <- dme_scatterplot(cgid = predictor_cpgs_vdz[grep(dmegs_vdz_t1$HGNC[2], predictor_cpgs_vdz$Gene),]$CpG, ensgv = dmegs_vdz_t1$ENSGv[2], gmset = gmset_vdz_t1, rld = rld_vdz_t1)
+scatterplot_tmem191b_ust_t1rvnr_me_ggplotobj <- dme_scatterplot(cgid = predictor_cpgs_ust[grep(dmegs_ust_t1$HGNC[2], predictor_cpgs_ust$Gene),]$CpG, ensgv = dmegs_ust_t1$ENSGv[2], gmset = gmset_ust_t1, rld = rld_ust_t1)
+
+pdf(width = 5, height = 5.5, file = fig_scatterplot_rfpl2_vdz_t1rvnr_me_pdf)
+scatterplot_rfpl2_vdz_t1rvnr_me_ggplotobj
+dev.off()
+pdf(width = 5, height = 5.5, file = fig_scatterplot_tmem191b_ust_t1rvnr_me_pdf)
+scatterplot_tmem191b_ust_t1rvnr_me_ggplotobj
+dev.off()
+```
+
+## Figure boxplots T2 RvNR
+
+```{r boxplot t1rvnr dmegs preparation}
+dmegs_vdz_t2 <- degs_vdz %>%
+  dplyr::filter(HGNC %in% predictor_genes_vdz) %>%
+  dplyr::filter(pvalue_T2RvNR<0.05)
+
+rld_vdz_t2 <- rld_vdz[,colData(rld_vdz)$VDZ_timepoint == "T2"]
+colData(rld_vdz_t2)$Response <- colData(rld_vdz_t2)$VDZ_response
+
+deg_vdz_t2 <- degs_vdz %>%
+  dplyr::select(ENSGv, ENSG, HGNC, baseMean_T2RvNR, log2FoldChange_T2RvNR, lfcSE_T2RvNR, stat_T2RvNR, pvalue_T2RvNR, padj_T2RvNR) %>%
+  dplyr::rename(baseMean = baseMean_T2RvNR, 
+                log2FoldChange = log2FoldChange_T2RvNR, 
+                lfcSE = lfcSE_T2RvNR, 
+                stat = stat_T2RvNR, 
+                pvalue = pvalue_T2RvNR, 
+                padj = padj_T2RvNR) %>%
+  dplyr::arrange(pvalue)
+
+dmegs_ust_t2 <- degs_ust %>%
+  dplyr::filter(HGNC %in% predictor_genes_ust) %>%
+  dplyr::filter(pvalue_T2RvNR<0.05)
+
+rld_ust_t2 <- rld_ust[,colData(rld_ust)$UST_timepoint == "T2"]
+colData(rld_ust_t2)$Response <- colData(rld_ust_t2)$UST_response
+
+deg_ust_t2 <- degs_ust %>%
+  dplyr::select(ENSGv, ENSG, HGNC, baseMean_T2RvNR, log2FoldChange_T2RvNR, lfcSE_T2RvNR, stat_T2RvNR, pvalue_T2RvNR, padj_T2RvNR) %>%
+  dplyr::rename(baseMean = baseMean_T2RvNR, 
+                log2FoldChange = log2FoldChange_T2RvNR, 
+                lfcSE = lfcSE_T2RvNR, 
+                stat = stat_T2RvNR, 
+                pvalue = pvalue_T2RvNR, 
+                padj = padj_T2RvNR) %>%
+  dplyr::arrange(pvalue)
+```
+
+```{r boxplot t2rvnr dmegs}
+boxplot_mcm2_vdz_t2_ggplotobj <- deg_boxplot(ensgv = dmegs_vdz_t2$ENSGv[1], rld = rld_vdz_t2, deg_results = deg_vdz_t2)
+boxplot_rfpl2_vdz_t2_ggplotobj <- deg_boxplot(ensgv = dmegs_vdz_t2$ENSGv[2], rld = rld_vdz_t2, deg_results = deg_vdz_t2)
+boxplot_potef_ust_t2_ggplotobj <- deg_boxplot(ensgv = dmegs_ust_t2$ENSGv[1], rld = rld_ust_t2, deg_results = deg_ust_t2)
+boxplot_hdac4_ust_t2_ggplotobj <- deg_boxplot(ensgv = dmegs_ust_t2$ENSGv[2], rld = rld_ust_t2, deg_results = deg_ust_t2)
+boxplot_parp4_ust_t2_ggplotobj <- deg_boxplot(ensgv = dmegs_ust_t2$ENSGv[3], rld = rld_ust_t2, deg_results = deg_ust_t2)
+boxplot_mark3_ust_t2_ggplotobj <- deg_boxplot(ensgv = dmegs_ust_t2$ENSGv[4], rld = rld_ust_t2, deg_results = deg_ust_t2)
+
+pdf(width = 3, height = 4, file = fig_boxplot_mcm2_t2rvnr_deg_vdz_pdf)
+print(boxplot_mcm2_vdz_t2_ggplotobj)
+dev.off()
+
+pdf(width = 3, height = 4, file = fig_boxplot_rfpl2_t2rvnr_deg_vdz_pdf)
+print(boxplot_rfpl2_vdz_t2_ggplotobj)
+dev.off()
+
+pdf(width = 3, height = 4, file = fig_boxplot_potef_t2rvnr_deg_ust_pdf)
+print(boxplot_potef_ust_t2_ggplotobj)
+dev.off()
+
+pdf(width = 3, height = 4, file = fig_boxplot_hdac4_t2rvnr_deg_ust_pdf)
+print(boxplot_hdac4_ust_t2_ggplotobj)
+dev.off()
+
+pdf(width = 3, height = 4, file = fig_boxplot_parp4_t1rvnr_deg_ust_pdf)
+print(boxplot_parp4_ust_t2_ggplotobj)
+dev.off()
+
+pdf(width = 3, height = 4, file = fig_boxplot_mark3_t1rvnr_deg_ust_pdf)
+print(boxplot_mark3_ust_t2_ggplotobj)
+dev.off()
+```
+
+## Figure scatterplots T2 RvNR
+
+```{r scatterplots t2rvnr dmegs}
+gmset_vdz_t2 <- gmset_vdz[,pData(gmset_vdz)$VDZ_timepoint == "T2"]
+pData(gmset_vdz_t2)$Response <- pData(gmset_vdz_t2)$VDZ_response
+
+gmset_ust_t2 <- gmset_ust[,pData(gmset_ust)$UST_timepoint == "T2"]
+pData(gmset_ust_t2)$Response <- pData(gmset_ust_t2)$UST_response
+
+scatterplot_rfpl2_vdz_t2rvnr_me_ggplotobj <- dme_scatterplot(cgid = predictor_cpgs_vdz[grep(dmegs_vdz_t2$HGNC[2], predictor_cpgs_vdz$Gene),]$CpG, ensgv = dmegs_vdz_t2$ENSGv[2], gmset = gmset_vdz_t2, rld = rld_vdz_t2)
+
+pdf(width = 5, height = 5.5, fig_scatterplot_rfpl2_vdz_t2rvnr_me_pdf)
+print(scatterplot_rfpl2_vdz_t2rvnr_me_ggplotobj)
+dev.off()
+```
+
+## sessionInfo
+
+```{r sessionInfo}
+sessionInfo()
+```
+

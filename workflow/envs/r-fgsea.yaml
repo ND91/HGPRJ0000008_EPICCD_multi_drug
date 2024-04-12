@@ -1,0 +1,14 @@
+channels:
+  - bioconda      
+  - conda-forge
+  - anaconda
+  - defaults
+  - r
+dependencies:
+  - r-biocmanager=1.30.18
+  - r-matrix=1.4_1
+  - r-devtools=2.4.4
+  - r-dplyr=1.0.10
+  - r-readxl=1.4.1
+  - r-msigdbr
+  - bioconductor-fgsea
